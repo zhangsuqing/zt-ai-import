@@ -124,6 +124,13 @@ button {
   font-size: 14px;
 }
 
+.nav-button {
+  width: 100%;
+  border: 0;
+  text-align: left;
+  background: transparent;
+}
+
 .nav-item.active {
   color: #fff;
   background: linear-gradient(90deg, rgba(15, 198, 194, .38), rgba(15, 198, 194, .08));
@@ -158,6 +165,17 @@ button {
   font-size: 14px;
 }
 
+.top-actions button,
+.tabs button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+}
+
 .badge {
   display: inline-flex;
   min-width: 18px;
@@ -184,6 +202,10 @@ button {
 .tab {
   color: var(--brand);
   font-weight: 700;
+}
+
+.tab.active {
+  border-bottom: 2px solid var(--brand);
 }
 
 .content {

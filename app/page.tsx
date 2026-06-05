@@ -4,15 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   Bell,
-  Boxes,
   CheckCircle2,
   ChevronDown,
   ClipboardList,
-  Database,
   FileInput,
   FileSpreadsheet,
-  Folder,
-  Home,
   Loader2,
   Menu,
   Plus,
@@ -29,23 +25,6 @@ import * as XLSX from "xlsx";
 import { extractFile } from "@/lib/client-file";
 import { parseWithRule, validateRows } from "@/lib/rule-engine";
 import { CanonicalField, ExtractedFile, fieldLabels, OrderRow, ParseRule, ValidationError, emptyOrderRow } from "@/lib/types";
-
-const navItems = [
-  ["首页", Home],
-  ["PDA操作管理", Folder],
-  ["OMS订单中心", ClipboardList],
-  ["基础管理", Folder],
-  ["仓链重构", Boxes],
-  ["工作台", Folder],
-  ["经营管理中心", Folder],
-  ["冷链财务管理", Folder],
-  ["数据预警", Database],
-  ["中通冷链业务员APP", Folder],
-  ["系统管理", Settings],
-  ["仓储中心", Folder],
-  ["测试二级目录2", Folder],
-  ["服务质量", Folder]
-] as const;
 
 const editableFields: CanonicalField[] = [
   "externalCode",
@@ -87,6 +66,9 @@ export default function Page() {
   const [keyword, setKeyword] = useState("");
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState("");
+  const [activeTab, setActiveTab] = useState<"import" | "history">("import");
+  const [auditStatus, setAuditStatus] = useState("全部");
+  const [effectStatus, setEffectStatus] = useState("全部");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -233,6 +215,10 @@ export default function Page() {
     setTimeout(() => setProgress(0), 800);
   }
 
+  function quickAction(name: string) {
+    toast.info(`${name}：演示环境已响应`);
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -245,39 +231,50 @@ export default function Page() {
         </div>
         <div className="org-row"><Menu size={16} />总部<ChevronDown size={16} style={{ marginLeft: "auto" }} /></div>
         <div className="nav-search"><Search size={15} /><input placeholder="输入菜单名称" /></div>
-        {navItems.map(([label, Icon]) => (
-          <div className={`nav-item ${label === "冷链财务管理" ? "active" : ""}`} key={label}>
-            <Icon size={16} />{label}
-          </div>
-        ))}
+        <button className="nav-item active nav-button" onClick={() => setActiveTab("import")}>
+          <UploadCloud size={16} />智能导入
+        </button>
+        <button className="nav-item nav-button" onClick={() => setActiveTab("history")}>
+          <ClipboardList size={16} />已导入运单
+        </button>
       </aside>
 
       <main className="main">
         <header className="topbar">
           <div className="top-nav"><span>财务中台</span><span>冷链智运</span><span>智冷仓链</span><span>更多租户...</span></div>
           <div className="top-actions">
-            <span>返回旧版</span><span>快件跟踪</span><span>待办<span className="badge">21</span></span>
-            <span><Bell size={15} /> 消息<span className="badge">99+</span></span><span>导出</span><span>下载</span><span>张素青</span><Settings size={15} />
+            <button onClick={() => quickAction("返回旧版")}>返回旧版</button>
+            <button onClick={() => quickAction("快件跟踪")}>快件跟踪</button>
+            <button onClick={() => quickAction("待办")}>待办<span className="badge">21</span></button>
+            <button onClick={() => quickAction("消息")}><Bell size={15} /> 消息<span className="badge">99+</span></button>
+            <button onClick={exportExcel}>导出</button>
+            <button onClick={() => quickAction("下载")}>下载</button>
+            <span>张素青</span><button onClick={() => quickAction("设置")}><Settings size={15} /></button>
           </div>
         </header>
-        <div className="tabs"><span>《</span><span className="tab">智能导入批量下单 ×</span><span style={{ marginLeft: "auto" }}><RefreshCw size={16} /></span></div>
+        <div className="tabs">
+          <button onClick={() => setActiveTab("import")}>《</button>
+          <button className={`tab ${activeTab === "import" ? "active" : ""}`} onClick={() => setActiveTab("import")}>智能导入批量下单 ×</button>
+          <button className={`tab ${activeTab === "history" ? "active" : ""}`} onClick={() => setActiveTab("history")}>已导入运单</button>
+          <button style={{ marginLeft: "auto" }} onClick={() => { void refreshRules(); void refreshHistory(keyword); toast.success("已刷新"); }}><RefreshCw size={16} /></button>
+        </div>
 
         <section className="content">
           <div className="panel filter-panel">
             <div className="segmented">
-              <span>审核状态</span><button className="active">全部</button><button>未审核</button><button>审核通过</button><button>审核驳回</button>
-              <span style={{ marginLeft: "auto" }}>生效状态</span><button className="active">全部</button><button>未生效</button><button>生效中</button><button>已失效</button>
+              <span>审核状态</span>{["全部", "未审核", "审核通过", "审核驳回"].map((item) => <button key={item} className={auditStatus === item ? "active" : ""} onClick={() => setAuditStatus(item)}>{item}</button>)}
+              <span style={{ marginLeft: "auto" }}>生效状态</span>{["全部", "未生效", "生效中", "已失效"].map((item) => <button key={item} className={effectStatus === item ? "active" : ""} onClick={() => setEffectStatus(item)}>{item}</button>)}
             </div>
             <div className="filter-grid">
               <div className="field"><label>报价编码</label><input className="input" placeholder="请输入" /></div>
               <div className="field"><label>报价名称</label><input className="input" placeholder="请输入" /></div>
               <div className="field"><label>生效区间</label><input className="input" placeholder="开始日期 - 结束日期" /></div>
               <div className="field"><label>结算流向</label><select className="select"><option>请选择</option></select></div>
-              <div className="toolbar-group"><button className="btn primary">查询</button><button className="btn">重置</button><button className="btn soft">收起</button></div>
+              <div className="toolbar-group"><button className="btn primary" onClick={() => toast.success("筛选条件已应用")}>查询</button><button className="btn" onClick={() => { setAuditStatus("全部"); setEffectStatus("全部"); toast.info("已重置"); }}>重置</button><button className="btn soft" onClick={() => quickAction("收起")}>收起</button></div>
             </div>
           </div>
 
-          <div className="grid-2">
+          {activeTab === "import" && <div className="grid-2">
             <div className="panel rule-editor">
               <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(event.dataTransfer.files); }}>
                 <div>
@@ -315,9 +312,9 @@ export default function Page() {
                 </div>
               ))}
             </div>
-          </div>
+          </div>}
 
-          <div className="panel">
+          {activeTab === "import" && <div className="panel">
             <div className="toolbar">
               <div className="toolbar-group">
                 <button className="btn primary" onClick={() => setRows((current) => [emptyOrderRow(), ...current])}><Plus size={15} />新增</button>
@@ -336,9 +333,9 @@ export default function Page() {
                 {errors.map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 · {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}
               </div>
             )}
-          </div>
+          </div>}
 
-          <div className="panel history">
+          <div className="panel history" id="history-panel">
             <div className="toolbar">
               <div className="toolbar-group"><FileSpreadsheet size={16} /><strong>已导入运单列表</strong><span className="muted">从服务端读取，支持筛选分页展示</span></div>
               <div className="toolbar-group">
