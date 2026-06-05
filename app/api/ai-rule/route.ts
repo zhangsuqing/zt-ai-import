@@ -49,10 +49,32 @@ type LooseMapping = Partial<FieldMapping> & {
   column?: number;
 };
 
+const normalizeCell = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+
+const detectsCardSheet = (file: ExtractedFile) =>
+  file.sheets.some((sheet) =>
+    sheet.rows.some((row) => {
+      const firstCell = normalizeCell(row[0]);
+      return firstCell.includes("调拨记录") || firstCell.includes("记录 #");
+    })
+  );
+
+const detectsMatrixSheet = (file: ExtractedFile) => {
+  const headers = file.sheets[0]?.rows[0] ?? [];
+  const hasSku = headers.some((header) => ["SKU名称", "SKU条码", "外部商品编码"].includes(normalizeCell(header)));
+  const markerIndex = headers.findIndex((header) => normalizeCell(header).includes("待移入数") || normalizeCell(header).includes("冻结数量"));
+  const hasStoreColumns = markerIndex >= 0 && headers.slice(markerIndex + 1).some((header) => {
+    const text = normalizeCell(header);
+    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+  });
+  return hasSku && hasStoreColumns;
+};
+
 const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRule> | null, file: ExtractedFile): ParseRule => {
   if (!generated) return fallback;
   const headerRowIndex = Math.max((fallback.headerRow ?? 1) - 1, 0);
   const headers = file.sheets[0]?.rows[headerRowIndex]?.map((cell) => String(cell ?? "").trim()) ?? [];
+  const detectedSourceKind: SourceKind = detectsCardSheet(file) ? "cards" : detectsMatrixSheet(file) ? "matrix" : fallback.sourceKind;
   const mappings = Array.isArray(generated.mappings)
     ? generated.mappings
         .map((mapping) => {
@@ -69,7 +91,7 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
     ...fallback,
     name: typeof generated.name === "string" ? generated.name : fallback.name,
     description: typeof generated.description === "string" ? generated.description : fallback.description,
-    sourceKind: sourceKinds.includes(generated.sourceKind as SourceKind) ? generated.sourceKind as SourceKind : fallback.sourceKind,
+    sourceKind: detectedSourceKind,
     sheetMode: generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
     headerRow: typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
     dataStartRow: typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,

@@ -303,6 +303,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     const text = normalize(header);
     return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
   });
+  const hasCardBlocks = looksLikeCardSheet(file);
   const mappings = [
     ["externalCode", ["外部编码", "配送单号", "单号", "订单号"]],
     ["storeName", ["门店", "店铺", "机构"]],
@@ -320,8 +321,8 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
   return {
     id: makeId(),
     name: `${file.fileName.replace(/\.[^.]+$/, "")} 推荐规则`,
-    description: "由文件结构启发式生成，可继续通过大模型优化后人工确认。",
-    sourceKind: hasSkuColumns && hasStoreMatrix ? "matrix" : file.fileType === "word" || file.fileType === "pdf" ? "textBlocks" : "table",
+    description: hasCardBlocks ? "识别“调拨记录 #N”卡片边界，逐个卡片提取收货信息和物品小表。" : "由文件结构启发式生成，可继续通过大模型优化后人工确认。",
+    sourceKind: hasCardBlocks ? "cards" : hasSkuColumns && hasStoreMatrix ? "matrix" : file.fileType === "word" || file.fileType === "pdf" ? "textBlocks" : "table",
     sheetMode: "all",
     headerRow,
     dataStartRow: headerRow + 1,
