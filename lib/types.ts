@@ -38,6 +38,11 @@ export type ParseRule = {
     columnHeaderAs: "storeName" | "date";
     valuePattern?: string;
   };
+  card?: {
+    startMarkers: string[];
+    infoLabels: Partial<Record<CanonicalField, string>>;
+    itemHeaderLabels: Partial<Record<CanonicalField, string>>;
+  };
   textBlock?: {
     blockSeparator?: string;
     itemLinePattern?: string;

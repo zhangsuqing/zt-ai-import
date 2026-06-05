@@ -49,6 +49,22 @@ type LooseMapping = Partial<FieldMapping> & {
   column?: number;
 };
 
+const defaultCardRule: NonNullable<ParseRule["card"]> = {
+  startMarkers: ["调拨记录", "记录 #"],
+  infoLabels: {
+    storeName: "调入门店",
+    receiverName: "收货人",
+    receiverPhone: "电话",
+    receiverAddress: "收货地址"
+  },
+  itemHeaderLabels: {
+    skuCode: "物品编码",
+    skuName: "物品名称",
+    skuSpec: "规格",
+    quantity: "数量"
+  }
+};
+
 const normalizeCell = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
 
 const detectsCardSheet = (file: ExtractedFile) =>
@@ -75,6 +91,7 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
   const headerRowIndex = Math.max((fallback.headerRow ?? 1) - 1, 0);
   const headers = file.sheets[0]?.rows[headerRowIndex]?.map((cell) => String(cell ?? "").trim()) ?? [];
   const detectedSourceKind: SourceKind = detectsCardSheet(file) ? "cards" : detectsMatrixSheet(file) ? "matrix" : fallback.sourceKind;
+  const isCardRule = detectedSourceKind === "cards";
   const mappings = Array.isArray(generated.mappings)
     ? generated.mappings
         .map((mapping) => {
@@ -93,11 +110,12 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
     description: typeof generated.description === "string" ? generated.description : fallback.description,
     sourceKind: detectedSourceKind,
     sheetMode: generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
-    headerRow: typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
-    dataStartRow: typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
+    headerRow: isCardRule ? undefined : typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
+    dataStartRow: isCardRule ? undefined : typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
     groupBy: canonicalFields.includes(generated.groupBy as CanonicalField) ? generated.groupBy as CanonicalField : fallback.groupBy,
-    mappings: mappings.length ? mappings : fallback.mappings,
+    mappings: isCardRule ? [] : mappings.length ? mappings : fallback.mappings,
     matrix: generated.matrix?.columnHeaderAs === "storeName" || generated.matrix?.columnHeaderAs === "date" ? generated.matrix : fallback.matrix,
+    card: isCardRule ? fallback.card ?? defaultCardRule : generated.card ?? fallback.card,
     textBlock: generated.textBlock ?? fallback.textBlock,
     skipPatterns: Array.isArray(generated.skipPatterns) ? generated.skipPatterns.filter((item) => typeof item === "string") : fallback.skipPatterns,
     createdBy: "ai",

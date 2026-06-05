@@ -155,47 +155,66 @@ const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
 const looksLikeCardSheet = (file: ExtractedFile) =>
   file.sheets.some((sheet) => sheet.rows.some((row) => normalize(row[0]).includes("调拨记录") || normalize(row[0]).includes("记录 #")));
 
+const defaultCardRule = {
+  startMarkers: ["调拨记录", "记录 #"],
+  infoLabels: {
+    storeName: "调入门店",
+    receiverName: "收货人",
+    receiverPhone: "电话",
+    receiverAddress: "收货地址"
+  },
+  itemHeaderLabels: {
+    skuCode: "物品编码",
+    skuName: "物品名称",
+    skuSpec: "规格",
+    quantity: "数量"
+  }
+} satisfies NonNullable<ParseRule["card"]>;
+
 const parseCardSheets = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const targetSheets = rule.sheetMode === "first" ? file.sheets.slice(0, 1) : file.sheets;
+  const cardRule = rule.card ?? defaultCardRule;
   const output: OrderRow[] = [];
 
   targetSheets.forEach((sheet) => {
     const rows = sheet.rows;
     for (let index = 0; index < rows.length; index += 1) {
       const marker = normalize(rows[index]?.[0]);
-      if (!marker.includes("调拨记录") && !marker.includes("记录 #")) continue;
+      if (!cardRule.startMarkers.some((startMarker) => marker.includes(startMarker))) continue;
 
       const cardStart = index;
       let cardEnd = rows.length;
       for (let next = index + 1; next < rows.length; next += 1) {
         const nextMarker = normalize(rows[next]?.[0]);
-        if (nextMarker.includes("调拨记录") || nextMarker.includes("记录 #")) {
+        if (cardRule.startMarkers.some((startMarker) => nextMarker.includes(startMarker))) {
           cardEnd = next;
           break;
         }
       }
 
       const cardRows = rows.slice(cardStart, cardEnd);
-      const infoRow = cardRows.find((row) => row.some((cell) => normalize(cell) === "调入门店" || normalize(cell) === "收货人" || normalize(cell) === "电话")) ?? [];
-      const addressRow = cardRows.find((row) => row.some((cell) => normalize(cell) === "收货地址")) ?? [];
-      const headerOffset = cardRows.findIndex((row) => row.some((cell) => normalize(cell) === "物品编码") && row.some((cell) => normalize(cell) === "数量"));
+      const infoLabels = Object.values(cardRule.infoLabels).filter(Boolean);
+      const itemLabels = Object.values(cardRule.itemHeaderLabels).filter(Boolean);
+      const infoRows = cardRows.filter((row) => row.some((cell) => infoLabels.includes(normalize(cell))));
+      const headerOffset = cardRows.findIndex((row) => itemLabels.every((label) => row.some((cell) => normalize(cell) === label)));
       if (headerOffset < 0) continue;
 
-      const valueAfter = (row: RawCell[], label: string) => {
+      const valueAfter = (label = "") => {
+        const row = infoRows.find((candidate) => candidate.some((cell) => normalize(cell) === label)) ?? [];
         const labelIndex = row.findIndex((cell) => normalize(cell) === label);
         return labelIndex >= 0 ? normalize(row[labelIndex + 1]) : "";
       };
-      const storeName = valueAfter(infoRow, "调入门店");
-      const receiverName = valueAfter(infoRow, "收货人");
-      const receiverPhone = valueAfter(infoRow, "电话");
-      const receiverAddress = valueAfter(addressRow, "收货地址");
+      const storeName = valueAfter(cardRule.infoLabels.storeName);
+      const receiverName = valueAfter(cardRule.infoLabels.receiverName);
+      const receiverPhone = valueAfter(cardRule.infoLabels.receiverPhone);
+      const receiverAddress = valueAfter(cardRule.infoLabels.receiverAddress);
       const externalCode = marker.match(/#\s*([A-Za-z0-9-]+)/)?.[1] ? `CARD-${marker.match(/#\s*([A-Za-z0-9-]+)/)?.[1]}` : "";
       const headers = cardRows[headerOffset];
-      const col = (label: string) => headers.findIndex((cell) => normalize(cell) === label);
-      const codeCol = col("物品编码");
-      const nameCol = col("物品名称");
-      const specCol = col("规格");
-      const qtyCol = col("数量");
+      const col = (label = "") => headers.findIndex((cell) => normalize(cell) === label);
+      const codeCol = col(cardRule.itemHeaderLabels.skuCode);
+      const nameCol = col(cardRule.itemHeaderLabels.skuName);
+      const specCol = col(cardRule.itemHeaderLabels.skuSpec);
+      const qtyCol = col(cardRule.itemHeaderLabels.quantity);
 
       cardRows.slice(headerOffset + 1).forEach((row, offset) => {
         const skuCode = normalize(row[codeCol]);
@@ -339,6 +358,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
       valueColumnsStartAt: matrixStart + 2,
       columnHeaderAs: "storeName"
     } : undefined,
+    card: hasCardBlocks ? defaultCardRule : undefined,
     skipPatterns: ["合计", "总计"],
     createdBy: "ai",
     updatedAt: new Date().toISOString()
@@ -364,12 +384,18 @@ export const buildRulePrompt = (file: ExtractedFile) => {
     { "target": "skuName", "source": "SKU名称", "confidence": 0.9, "guessed": true }
   ],
   "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
+  "card": {
+    "startMarkers": ["调拨记录", "记录 #"],
+    "infoLabels": { "storeName": "调入门店", "receiverName": "收货人", "receiverPhone": "电话", "receiverAddress": "收货地址" },
+    "itemHeaderLabels": { "skuCode": "物品编码", "skuName": "物品名称", "skuSpec": "规格", "quantity": "数量" }
+  },
   "skipPatterns": ["合计", "总计"]
 }
 target 只能取这些英文内部字段：externalCode, storeName, receiverName, receiverPhone, receiverAddress, skuCode, skuName, quantity, skuSpec, temperature, remark。
 source 必须是文件表头原文，例如 SKU名称、SKU条码、物品编码、数量。
 sourceKind 只能是 table、matrix、cards、textBlocks；sheetMode 只能是 first、all。
 如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始。
+如果每条记录由“调拨记录 #N”这类标题行、收货信息行和物品小表组成，sourceKind 必须为 cards，并用 card 描述卡片边界、收货信息标签和物品小表表头；此时 mappings 可以为空。
 目标字段中文含义：${Object.values(fieldLabels).join("、")}。
 文件名：${file.fileName}
 文件类型：${file.fileType}
