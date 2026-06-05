@@ -87,9 +87,13 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const skuNameCol = headerIndexOf(["SKU名称", "物品名称", "商品名称"]);
   const skuCodeCol = headerIndexOf(["SKU条码", "外部商品编码", "SKU物品编码", "商品编码"]);
   const skuSpecCol = headerIndexOf(["规格", "SKU规格型号", "规格型号"]);
+  const groupByIndexes = rule.matrix?.groupByFields?.map((field) => headers.findIndex((header) => normalize(header) === field)).filter((index) => index >= 0) ?? [];
 
   sheet.rows.slice(headerIndex + 1).forEach((sourceRow, offset) => {
     if (!hasText(sourceRow)) return;
+    const groupValues = groupByIndexes.map((index) => normalize(sourceRow[index])).filter(Boolean);
+    const matrixGroupKey = groupValues.join("-");
+    const matrixReceiverName = groupValues[groupValues.length - 1] || matrixGroupKey;
     headers.slice(valueStart, valueEnd).forEach((header, headerOffset) => {
       const columnName = normalize(header);
       if (!columnName || stockMetricPattern.test(columnName)) return;
@@ -101,9 +105,9 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
       rows.push({
         ...base,
         id: makeId(),
-        externalCode: base.externalCode,
-        storeName: rule.matrix?.columnHeaderAs === "storeName" ? columnName : base.storeName,
-        remark: rule.matrix?.columnHeaderAs === "date" ? `${base.remark} ${columnName}`.trim() : base.remark,
+        externalCode: base.externalCode || matrixGroupKey,
+        storeName: base.storeName || matrixReceiverName || (rule.matrix?.columnHeaderAs === "storeName" ? columnName : ""),
+        remark: [base.remark, columnName].filter(Boolean).join(" "),
         skuCode: skuCodeCol >= 0 ? normalize(sourceRow[skuCodeCol]) : base.skuCode,
         skuName: skuNameCol >= 0 ? normalize(sourceRow[skuNameCol]) : base.skuName,
         skuSpec: skuSpecCol >= 0 ? normalize(sourceRow[skuSpecCol]) : base.skuSpec,
@@ -358,7 +362,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     sheetMode: "all",
     headerRow,
     dataStartRow: headerRow + 1,
-    groupBy: hasSkuColumns && hasStoreMatrix ? "storeName" : "externalCode",
+    groupBy: "externalCode",
     mappings: mappings
       .map(([target, keys]) => {
         const source = pick(keys);
@@ -368,6 +372,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
       .map((mapping) => mapping.target === "quantity" ? { ...mapping, transform: "number" as const } : mapping),
     matrix: hasSkuColumns && hasStoreMatrix ? {
       fixedFields: ["SKU名称", "SKU条码", "规格"],
+      groupByFields: ["仓库名称", "货主名称"],
       valueColumnsStartAt: firstStoreColumn + 1,
       columnHeaderAs: "storeName"
     } : undefined,
@@ -396,7 +401,7 @@ export const buildRulePrompt = (file: ExtractedFile) => {
   "mappings": [
     { "target": "skuName", "source": "SKU名称", "confidence": 0.9, "guessed": true }
   ],
-  "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
+  "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "groupByFields": ["仓库名称","货主名称"], "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
   "card": {
     "startMarkers": ["调拨记录", "记录 #"],
     "infoLabels": { "storeName": "调入门店", "receiverName": "收货人", "receiverPhone": "电话", "receiverAddress": "收货地址" },
@@ -407,7 +412,7 @@ export const buildRulePrompt = (file: ExtractedFile) => {
 target 只能取这些英文内部字段：externalCode, storeName, receiverName, receiverPhone, receiverAddress, skuCode, skuName, quantity, skuSpec, temperature, remark。
 source 必须是文件表头原文，例如 SKU名称、SKU条码、物品编码、数量。
 sourceKind 只能是 table、matrix、cards、textBlocks；sheetMode 只能是 first、all。
-如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始。
+如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始；同一笔单的聚合字段写入 matrix.groupByFields，例如 ["仓库名称","货主名称"]。
 如果每条记录由“调拨记录 #N”这类标题行、收货信息行和物品小表组成，sourceKind 必须为 cards，并用 card 描述卡片边界、收货信息标签和物品小表表头；此时 mappings 可以为空。
 目标字段中文含义：${Object.values(fieldLabels).join("、")}。
 文件名：${file.fileName}

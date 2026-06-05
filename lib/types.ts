@@ -34,6 +34,7 @@ export type ParseRule = {
   mappings: FieldMapping[];
   matrix?: {
     fixedFields: string[];
+    groupByFields?: string[];
     valueColumnsStartAt?: number;
     columnHeaderAs: "storeName" | "date";
     valuePattern?: string;
