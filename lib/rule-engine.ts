@@ -350,8 +350,26 @@ export const buildRulePrompt = (file: ExtractedFile) => {
     rows: sheet.rows.slice(0, 12)
   }));
   return `你是物流出库单解析规则设计助手。请根据文件预览生成通用解析规则 JSON，不要直接输出订单数据。
-目标字段：${Object.values(fieldLabels).join("、")}。
-规则需描述 headerRow、dataStartRow、sheetMode、sourceKind、groupBy、mappings、skipPatterns；复杂结构可用 matrix/textBlock。
+必须严格返回以下 TypeScript 结构对应的 JSON，不要使用 field/column/format/single/excel/row 等自定义字段或枚举：
+{
+  "name": "规则名称",
+  "description": "规则说明",
+  "sourceKind": "table | matrix | cards | textBlocks",
+  "sheetMode": "first | all",
+  "headerRow": 1,
+  "dataStartRow": 2,
+  "groupBy": "externalCode",
+  "mappings": [
+    { "target": "skuName", "source": "SKU名称", "confidence": 0.9, "guessed": true }
+  ],
+  "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
+  "skipPatterns": ["合计", "总计"]
+}
+target 只能取这些英文内部字段：externalCode, storeName, receiverName, receiverPhone, receiverAddress, skuCode, skuName, quantity, skuSpec, temperature, remark。
+source 必须是文件表头原文，例如 SKU名称、SKU条码、物品编码、数量。
+sourceKind 只能是 table、matrix、cards、textBlocks；sheetMode 只能是 first、all。
+如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始。
+目标字段中文含义：${Object.values(fieldLabels).join("、")}。
 文件名：${file.fileName}
 文件类型：${file.fileType}
 表格预览：${JSON.stringify(sheetPreview)}

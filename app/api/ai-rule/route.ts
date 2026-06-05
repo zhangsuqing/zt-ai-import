@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildRulePrompt, makeHeuristicRule } from "@/lib/rule-engine";
-import { ExtractedFile, ParseRule } from "@/lib/types";
+import { CanonicalField, ExtractedFile, FieldMapping, ParseRule, SourceKind } from "@/lib/types";
 
 export const runtime = "nodejs";
 
@@ -13,6 +13,74 @@ const parseJsonFromModel = (content: string): Partial<ParseRule> | null => {
   } catch {
     return null;
   }
+};
+
+const sourceKinds: SourceKind[] = ["table", "matrix", "cards", "textBlocks"];
+const canonicalFields: CanonicalField[] = [
+  "externalCode",
+  "storeName",
+  "receiverName",
+  "receiverPhone",
+  "receiverAddress",
+  "skuCode",
+  "skuName",
+  "quantity",
+  "skuSpec",
+  "temperature",
+  "remark"
+];
+
+const labelToField: Record<string, CanonicalField> = {
+  外部编码: "externalCode",
+  收货门店: "storeName",
+  收件人姓名: "receiverName",
+  收件人电话: "receiverPhone",
+  收件人地址: "receiverAddress",
+  SKU物品编码: "skuCode",
+  SKU物品名称: "skuName",
+  SKU发货数量: "quantity",
+  SKU规格型号: "skuSpec",
+  温区: "temperature",
+  备注: "remark"
+};
+
+type LooseMapping = Partial<FieldMapping> & {
+  field?: string;
+  column?: number;
+};
+
+const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRule> | null, file: ExtractedFile): ParseRule => {
+  if (!generated) return fallback;
+  const headerRowIndex = Math.max((fallback.headerRow ?? 1) - 1, 0);
+  const headers = file.sheets[0]?.rows[headerRowIndex]?.map((cell) => String(cell ?? "").trim()) ?? [];
+  const mappings = Array.isArray(generated.mappings)
+    ? generated.mappings
+        .map((mapping) => {
+          const item = mapping as LooseMapping;
+          if (item.source && canonicalFields.includes(item.target as CanonicalField) && headers.includes(item.source)) return item as FieldMapping;
+          const target = item.field ? labelToField[item.field] : undefined;
+          const source = typeof item.column === "number" ? headers[item.column] : undefined;
+          return target && source ? { target, source, guessed: true, confidence: 0.65 } satisfies FieldMapping : null;
+        })
+        .filter((mapping): mapping is FieldMapping => Boolean(mapping))
+    : [];
+
+  return {
+    ...fallback,
+    name: typeof generated.name === "string" ? generated.name : fallback.name,
+    description: typeof generated.description === "string" ? generated.description : fallback.description,
+    sourceKind: sourceKinds.includes(generated.sourceKind as SourceKind) ? generated.sourceKind as SourceKind : fallback.sourceKind,
+    sheetMode: generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
+    headerRow: typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
+    dataStartRow: typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
+    groupBy: canonicalFields.includes(generated.groupBy as CanonicalField) ? generated.groupBy as CanonicalField : fallback.groupBy,
+    mappings: mappings.length ? mappings : fallback.mappings,
+    matrix: generated.matrix?.columnHeaderAs === "storeName" || generated.matrix?.columnHeaderAs === "date" ? generated.matrix : fallback.matrix,
+    textBlock: generated.textBlock ?? fallback.textBlock,
+    skipPatterns: Array.isArray(generated.skipPatterns) ? generated.skipPatterns.filter((item) => typeof item === "string") : fallback.skipPatterns,
+    createdBy: "ai",
+    updatedAt: new Date().toISOString()
+  };
 };
 
 export async function POST(request: NextRequest) {
@@ -60,13 +128,7 @@ export async function POST(request: NextRequest) {
     const generated = parseJsonFromModel(content);
 
     return NextResponse.json({
-      rule: {
-        ...fallback,
-        ...generated,
-        id: fallback.id,
-        createdBy: "ai",
-        updatedAt: new Date().toISOString()
-      },
+      rule: normalizeGeneratedRule(fallback, generated, file),
       usedModel: model
     });
   } catch (error) {
