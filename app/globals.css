@@ -437,6 +437,64 @@ button {
   max-height: 56vh;
 }
 
+.card-preview {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  max-height: 56vh;
+  overflow: auto;
+}
+
+.order-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.order-card-head {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f7fbfc;
+}
+
+.card-info-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 10px;
+  padding: 12px;
+}
+
+.card-info-grid label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.card-info-grid input {
+  height: 32px;
+  border: 1px solid #d8e2ea;
+  border-radius: 4px;
+  padding: 0 8px;
+  outline: 0;
+  color: var(--text);
+}
+
+.card-items {
+  max-height: none;
+  border-top: 1px solid var(--line);
+}
+
+.card-items table {
+  min-width: 760px;
+}
+
 table {
   border-collapse: separate;
   border-spacing: 0;

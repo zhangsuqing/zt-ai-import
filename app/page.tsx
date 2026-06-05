@@ -37,6 +37,31 @@ const editableFields: CanonicalField[] = [
   "remark"
 ];
 
+const previewFieldOrder: CanonicalField[] = editableFields;
+const cardReceiverFields: CanonicalField[] = ["storeName", "receiverName", "receiverPhone", "receiverAddress"];
+const cardItemFields: CanonicalField[] = ["skuCode", "skuName", "quantity", "skuSpec", "remark"];
+
+type PreviewColumn = {
+  field: CanonicalField;
+  label: string;
+};
+
+function makePreviewColumns(rule: ParseRule | null, rows: OrderRow[]): PreviewColumn[] {
+  const mappedFields = rule?.mappings?.map((mapping) => mapping.target) ?? [];
+  const valuedFields = previewFieldOrder.filter((field) => rows.some((row) => String(row[field] ?? "").trim()));
+  const structuralFields = rule?.sourceKind === "matrix" ? ["storeName", "skuCode", "skuName", "quantity", "skuSpec"] as CanonicalField[] : [];
+  const selected = [...mappedFields, ...structuralFields, ...valuedFields].filter((field, index, list) => list.indexOf(field) === index);
+  return previewFieldOrder
+    .filter((field) => selected.includes(field))
+    .map((field) => {
+      const mappingLabel = rule?.mappings?.find((mapping) => mapping.target === field)?.source;
+      const matrixLabel = rule?.sourceKind === "matrix"
+        ? ({ storeName: "门店", skuCode: mappingLabel || "SKU条码", skuName: mappingLabel || "SKU名称", quantity: "数量", skuSpec: mappingLabel || "规格" } as Partial<Record<CanonicalField, string>>)[field]
+        : undefined;
+      return { field, label: matrixLabel || mappingLabel || fieldLabels[field] };
+    });
+}
+
 const makeManualRule = (): ParseRule => ({
   id: crypto.randomUUID(),
   name: "新建空白规则",
@@ -223,12 +248,18 @@ export default function Page() {
     setRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: field === "quantity" ? value : value } : row)));
   }
 
+  function updateGroupCells(rowIds: string[], field: CanonicalField, value: string) {
+    const ids = new Set(rowIds);
+    setRows((current) => current.map((row) => (ids.has(row.id) ? { ...row, [field]: value } : row)));
+  }
+
   function deleteRow(rowId: string) {
     setRows((current) => current.filter((row) => row.id !== rowId));
   }
 
   function exportExcel() {
-    const data = rows.map((row) => Object.fromEntries(editableFields.map((field) => [fieldLabels[field], row[field]])));
+    const columns = previewColumns.length ? previewColumns : editableFields.map((field) => ({ field, label: fieldLabels[field] }));
+    const data = rows.map((row) => Object.fromEntries(columns.map((column) => [column.label, row[column.field]])));
     const sheet = XLSX.utils.json_to_sheet(data);
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, "预览数据");
@@ -261,6 +292,14 @@ export default function Page() {
   const previewPageSize = 100;
   const totalPreviewPages = Math.max(1, Math.ceil(rows.length / previewPageSize));
   const pagedRows = rows.slice((previewPage - 1) * previewPageSize, previewPage * previewPageSize);
+  const previewRule = useMemo(() => {
+    try {
+      return ruleDraft ? JSON.parse(ruleDraft) as ParseRule : activeRule;
+    } catch {
+      return activeRule;
+    }
+  }, [activeRule, ruleDraft]);
+  const previewColumns = useMemo(() => makePreviewColumns(previewRule, rows), [previewRule, rows]);
 
   return (
     <div className="app-shell">
@@ -353,7 +392,11 @@ export default function Page() {
                 <span className="muted">共 {rows.length} 条 · 每页渲染 {previewPageSize} 条</span>
               </div>
             </div>
-            <EditableTable rows={pagedRows} errors={errorMap} onChange={updateCell} onDelete={deleteRow} startIndex={(previewPage - 1) * previewPageSize} />
+            {previewRule?.sourceKind === "cards" ? (
+              <CardPreview rule={previewRule} rows={pagedRows} errors={errorMap} onItemChange={updateCell} onGroupChange={updateGroupCells} onDelete={deleteRow} />
+            ) : (
+              <EditableTable rows={pagedRows} columns={previewColumns} errors={errorMap} onChange={updateCell} onDelete={deleteRow} startIndex={(previewPage - 1) * previewPageSize} />
+            )}
             <div className="pager">
               <span>预览 {rows.length} 条</span>
               <button className="btn" disabled={previewPage <= 1} onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}>上一页</button>
@@ -395,13 +438,14 @@ export default function Page() {
   );
 }
 
-function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { rows: OrderRow[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void; startIndex?: number }) {
+function EditableTable({ rows, columns, errors, onChange, onDelete, startIndex = 0 }: { rows: OrderRow[]; columns: PreviewColumn[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void; startIndex?: number }) {
   if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
+  const visibleColumns = columns.length ? columns : editableFields.map((field) => ({ field, label: fieldLabels[field] }));
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>序号</th>{editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}<th>操作</th></tr>
+          <tr><th>序号</th>{visibleColumns.map((column) => <th key={column.field}>{column.label}</th>)}<th>操作</th></tr>
         </thead>
         <tbody>
           {rows.map((row, index) => {
@@ -409,9 +453,9 @@ function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { r
             return (
               <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
                 <td>{startIndex + index + 1}</td>
-                {editableFields.map((field) => (
-                  <td key={field} className={rowErrors?.has(field) || rowErrors?.has("row") ? "error-cell" : ""}>
-                    <input value={String(row[field] ?? "")} onChange={(event) => onChange(row.id, field, event.target.value)} />
+                {visibleColumns.map((column) => (
+                  <td key={column.field} className={rowErrors?.has(column.field) || rowErrors?.has("row") ? "error-cell" : ""}>
+                    <input value={String(row[column.field] ?? "")} onChange={(event) => onChange(row.id, column.field, event.target.value)} />
                   </td>
                 ))}
                 <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
@@ -420,6 +464,65 @@ function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { r
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CardPreview({ rule, rows, errors, onItemChange, onGroupChange, onDelete }: { rule: ParseRule | null; rows: OrderRow[]; errors: Map<string, Set<string>>; onItemChange: (rowId: string, field: CanonicalField, value: string) => void; onGroupChange: (rowIds: string[], field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void }) {
+  if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
+  const receiverColumns = cardReceiverFields.map((field) => ({ field, label: rule?.card?.infoLabels?.[field] || fieldLabels[field] }));
+  const itemColumns = cardItemFields.map((field) => ({ field, label: rule?.card?.itemHeaderLabels?.[field] || fieldLabels[field] }));
+  const groups = Array.from(rows.reduce((map, row) => {
+    const key = row.externalCode || row.remark || row.id;
+    const list = map.get(key) ?? [];
+    list.push(row);
+    map.set(key, list);
+    return map;
+  }, new Map<string, OrderRow[]>()).values());
+
+  return (
+    <div className="card-preview">
+      {groups.map((group) => {
+        const first = group[0];
+        const rowIds = group.map((row) => row.id);
+        const hasError = group.some((row) => errors.get(row.id)?.size);
+        return (
+          <div className="order-card" key={first.externalCode || first.remark || first.id}>
+            <div className="order-card-head">
+              <strong>{first.remark || first.externalCode || "调拨记录"}</strong>
+              <span className={`status-pill ${hasError ? "bad" : "ok"}`}>{group.length} 个 SKU</span>
+            </div>
+            <div className="card-info-grid">
+              {receiverColumns.map((column) => (
+                <label key={column.field}>
+                  <span>{column.label}</span>
+                  <input value={String(first[column.field] ?? "")} onChange={(event) => onGroupChange(rowIds, column.field, event.target.value)} />
+                </label>
+              ))}
+            </div>
+            <div className="table-wrap card-items">
+              <table>
+                <thead><tr>{itemColumns.map((column) => <th key={column.field}>{column.label}</th>)}<th>操作</th></tr></thead>
+                <tbody>
+                  {group.map((row) => {
+                    const rowErrors = errors.get(row.id);
+                    return (
+                      <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
+                        {itemColumns.map((column) => (
+                          <td key={column.field} className={rowErrors?.has(column.field) || rowErrors?.has("row") ? "error-cell" : ""}>
+                            <input value={String(row[column.field] ?? "")} onChange={(event) => onItemChange(row.id, column.field, event.target.value)} />
+                          </td>
+                        ))}
+                        <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
