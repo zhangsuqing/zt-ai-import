@@ -34,7 +34,6 @@ const editableFields: CanonicalField[] = [
   "skuName",
   "quantity",
   "skuSpec",
-  "temperature",
   "remark"
 ];
 
@@ -402,7 +401,7 @@ function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { r
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>序号</th><th>状态</th>{editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}<th>来源</th><th>操作</th></tr>
+          <tr><th>序号</th>{editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}<th>操作</th></tr>
         </thead>
         <tbody>
           {rows.map((row, index) => {
@@ -410,13 +409,11 @@ function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { r
             return (
               <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
                 <td>{startIndex + index + 1}</td>
-                <td><span className={`status-pill ${rowErrors?.size ? "bad" : "ok"}`}>{rowErrors?.size ? "待修正" : "有效"}</span></td>
                 {editableFields.map((field) => (
                   <td key={field} className={rowErrors?.has(field) || rowErrors?.has("row") ? "error-cell" : ""}>
                     <input value={String(row[field] ?? "")} onChange={(event) => onChange(row.id, field, event.target.value)} />
                   </td>
                 ))}
-                <td>{row.sourceSheet ?? "-"} {row.sourceRow ?? ""}</td>
                 <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
               </tr>
             );
@@ -432,12 +429,11 @@ function HistoryTable({ rows }: { rows: OrderRow[] }) {
   return (
     <div className="table-wrap" style={{ maxHeight: 320 }}>
       <table>
-        <thead><tr><th>外部编码</th><th>收货门店</th><th>收件人</th><th>电话</th><th>SKU</th><th>数量</th><th>温区</th><th>审核状态</th><th>操作</th></tr></thead>
+        <thead><tr><th>外部编码</th><th>收货门店</th><th>收件人姓名</th><th>收件人电话</th><th>SKU物品编码</th><th>SKU物品名称</th><th>SKU发货数量</th><th>SKU规格型号</th><th>备注</th></tr></thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.id}>
-              <td>{row.externalCode}</td><td>{row.storeName}</td><td>{row.receiverName}</td><td>{row.receiverPhone}</td><td>{row.skuName}</td><td>{row.quantity}</td><td>{row.temperature}</td>
-              <td><span className="status-pill ok">审核通过</span></td><td style={{ color: "var(--brand)", fontWeight: 700 }}>详情　编辑　复制　更多⌄</td>
+              <td>{row.externalCode}</td><td>{row.storeName}</td><td>{row.receiverName}</td><td>{row.receiverPhone}</td><td>{row.skuCode}</td><td>{row.skuName}</td><td>{row.quantity}</td><td>{row.skuSpec}</td><td>{row.remark}</td>
             </tr>
           ))}
         </tbody>
