@@ -130,19 +130,47 @@ const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
 };
 
 export const parseWithRule = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
-  if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
-  if (rule.sourceKind === "textBlocks" || rule.sourceKind === "cards") return parseTextBlocks(file, rule);
-  return parseTable(file, rule);
+  const rows = (() => {
+    if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
+    if (rule.sourceKind === "textBlocks" || rule.sourceKind === "cards") return parseTextBlocks(file, rule);
+    return parseTable(file, rule);
+  })();
+  return shareReceivingInfoByExternalCode(rows);
+};
+
+export const shareReceivingInfoByExternalCode = (rows: OrderRow[]): OrderRow[] => {
+  const groups = new Map<string, Partial<OrderRow>>();
+  rows.forEach((row) => {
+    if (!row.externalCode) return;
+    const current = groups.get(row.externalCode) ?? {};
+    groups.set(row.externalCode, {
+      storeName: current.storeName || row.storeName,
+      receiverName: current.receiverName || row.receiverName,
+      receiverPhone: current.receiverPhone || row.receiverPhone,
+      receiverAddress: current.receiverAddress || row.receiverAddress
+    });
+  });
+
+  return rows.map((row) => {
+    if (!row.externalCode) return row;
+    const shared = groups.get(row.externalCode);
+    if (!shared) return row;
+    return {
+      ...row,
+      storeName: row.storeName || shared.storeName || "",
+      receiverName: row.receiverName || shared.receiverName || "",
+      receiverPhone: row.receiverPhone || shared.receiverPhone || "",
+      receiverAddress: row.receiverAddress || shared.receiverAddress || ""
+    };
+  });
 };
 
 export const validateRows = (rows: OrderRow[], existingCodes: string[] = []): ValidationError[] => {
   const errors: ValidationError[] = [];
-  const seen = new Map<string, number>();
 
   rows.forEach((row, index) => {
     const rowNumber = index + 1;
     const add = (field: ValidationError["field"], message: string) => errors.push({ rowId: row.id, rowNumber, field, message });
-    if (!row.externalCode) add("externalCode", "外部编码不能为空");
     if (!row.storeName && !(row.receiverName && row.receiverPhone && row.receiverAddress)) {
       add("row", "收货门店，或收件人姓名/电话/地址必须至少填写一组");
     }
@@ -151,9 +179,7 @@ export const validateRows = (rows: OrderRow[], existingCodes: string[] = []): Va
     if (!Number(row.quantity) || Number(row.quantity) <= 0) add("quantity", "SKU发货数量必须为正数");
     if (row.receiverPhone && !/^1[3-9]\d{9}$|^\d{3,4}-?\d{7,8}$/.test(row.receiverPhone)) add("receiverPhone", "电话格式不正确");
     if (row.temperature && !["冷冻", "冷藏", "常温", "全部", "冷冻,常温", "冷冻,常温,冷藏"].includes(row.temperature)) add("temperature", "温区值不在允许范围内");
-    if (seen.has(row.externalCode)) add("externalCode", `同批次重复，首次出现在第 ${seen.get(row.externalCode)} 行`);
-    if (row.externalCode) seen.set(row.externalCode, seen.get(row.externalCode) ?? rowNumber);
-    if (existingCodes.includes(row.externalCode)) add("externalCode", "与已导入运单重复");
+    if (row.externalCode && existingCodes.includes(row.externalCode)) add("externalCode", "与已导入运单重复");
   });
 
   return errors;
