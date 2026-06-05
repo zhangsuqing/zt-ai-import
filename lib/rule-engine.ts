@@ -70,29 +70,52 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   if (!sheet) return [];
   const headerIndex = Math.max((rule.headerRow ?? 1) - 1, 0);
   const headers = sheet.rows[headerIndex] ?? [];
-  const valueStart = rule.matrix?.valueColumnsStartAt ?? 2;
+  const inferredStart = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
+  const valueStart = rule.matrix?.valueColumnsStartAt ?? (inferredStart >= 0 ? inferredStart + 2 : 2);
+  const explicitEnd = headers.findIndex((header) => normalize(header).includes("下单后结余"));
+  const valueEnd = explicitEnd > valueStart ? explicitEnd : headers.length;
   const baseHeaders = headers.slice(0, valueStart);
   const rows: OrderRow[] = [];
+  const headerIndexOf = (labels: string[]) => headers.findIndex((header) => labels.some((label) => normalize(header) === label));
+  const skuNameCol = headerIndexOf(["SKU名称", "物品名称", "商品名称"]);
+  const skuCodeCol = headerIndexOf(["SKU条码", "外部商品编码", "SKU物品编码", "商品编码"]);
+  const skuSpecCol = headerIndexOf(["规格", "SKU规格型号", "规格型号"]);
 
   sheet.rows.slice(headerIndex + 1).forEach((sourceRow, offset) => {
     if (!hasText(sourceRow)) return;
-    headers.slice(valueStart).forEach((header, headerOffset) => {
+    headers.slice(valueStart, valueEnd).forEach((header, headerOffset) => {
+      const columnName = normalize(header);
+      if (!columnName || /总和|库存|可用|分配|冻结|结余/.test(columnName)) return;
       const value = sourceRow[valueStart + headerOffset];
       if (!normalize(value)) return;
       const base = mapRow(sourceRow.slice(0, valueStart), baseHeaders, rule, sheet.name, headerIndex + 1 + offset);
-      const columnName = normalize(header);
       const quantity = asNumber(value);
+      if (!quantity || quantity <= 0) return;
       rows.push({
         ...base,
         id: makeId(),
         externalCode: base.externalCode || `${columnName}-${offset + 1}-${headerOffset + 1}`,
         storeName: rule.matrix?.columnHeaderAs === "storeName" ? columnName : base.storeName,
         remark: rule.matrix?.columnHeaderAs === "date" ? `${base.remark} ${columnName}`.trim() : base.remark,
+        skuCode: skuCodeCol >= 0 ? normalize(sourceRow[skuCodeCol]) : base.skuCode,
+        skuName: skuNameCol >= 0 ? normalize(sourceRow[skuNameCol]) : base.skuName,
+        skuSpec: skuSpecCol >= 0 ? normalize(sourceRow[skuSpecCol]) : base.skuSpec,
         quantity: quantity || normalize(value)
       });
     });
   });
   return rows;
+};
+
+const looksLikeMatrixSheet = (file: ExtractedFile) => {
+  const headers = file.sheets[0]?.rows[0] ?? [];
+  const hasSku = headers.some((header) => ["SKU名称", "SKU条码", "外部商品编码"].includes(normalize(header)));
+  const markerIndex = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
+  const hasStoreColumns = markerIndex >= 0 && headers.slice(markerIndex + 1).some((header) => {
+    const text = normalize(header);
+    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+  });
+  return hasSku && hasStoreColumns;
 };
 
 const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
@@ -207,6 +230,7 @@ const parseCardSheets = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
 export const parseWithRule = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const rows = (() => {
     if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
+    if (looksLikeMatrixSheet(file)) return parseMatrix(file, { ...rule, sourceKind: "matrix", matrix: rule.matrix ?? { fixedFields: ["SKU名称", "SKU条码", "规格"], columnHeaderAs: "storeName" } });
     if (rule.sourceKind === "cards" || looksLikeCardSheet(file)) return parseCardSheets(file, rule);
     if (rule.sourceKind === "textBlocks") return parseTextBlocks(file, rule);
     return parseTable(file, rule);
@@ -267,15 +291,26 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
   let headerRow = rows.findIndex((row) => row.filter((cell) => normalize(cell)).length >= 3) + 1;
   if (headerRow <= 0) headerRow = 1;
   const headers = rows[headerRow - 1] ?? [];
-  const pick = (keywords: readonly string[]) => normalize(headers.find((header) => keywords.some((kw) => normalize(header).includes(kw))));
+  const pick = (keywords: readonly string[]) => {
+    const normalized = headers.map((header) => normalize(header));
+    const exact = normalized.find((header) => keywords.some((kw) => header === kw));
+    if (exact) return exact;
+    return normalized.find((header) => keywords.some((kw) => header.includes(kw) && !/仓库|货主|库存|可用|冻结|分配|结余/.test(header))) ?? "";
+  };
+  const hasSkuColumns = Boolean(pick(["SKU名称"])) && Boolean(pick(["SKU条码", "外部商品编码"]));
+  const matrixStart = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
+  const hasStoreMatrix = matrixStart >= 0 && headers.slice(matrixStart + 1).some((header) => {
+    const text = normalize(header);
+    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+  });
   const mappings = [
     ["externalCode", ["外部编码", "配送单号", "单号", "订单号"]],
     ["storeName", ["门店", "店铺", "机构"]],
     ["receiverName", ["收件人", "联系人", "姓名"]],
     ["receiverPhone", ["电话", "手机", "联系方式"]],
     ["receiverAddress", ["地址"]],
-    ["skuCode", ["SKU", "编码", "物料编码", "商品编码"]],
-    ["skuName", ["名称", "品名", "商品", "物品"]],
+    ["skuCode", ["SKU物品编码", "SKU条码", "外部商品编码", "物料编码", "商品编码"]],
+    ["skuName", ["SKU物品名称", "SKU名称", "物品名称", "商品名称", "品名"]],
     ["quantity", ["数量", "件数", "发货数量"]],
     ["skuSpec", ["规格", "型号"]],
     ["temperature", ["温区"]],
@@ -286,7 +321,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     id: makeId(),
     name: `${file.fileName.replace(/\.[^.]+$/, "")} 推荐规则`,
     description: "由文件结构启发式生成，可继续通过大模型优化后人工确认。",
-    sourceKind: file.fileType === "word" || file.fileType === "pdf" ? "textBlocks" : "table",
+    sourceKind: hasSkuColumns && hasStoreMatrix ? "matrix" : file.fileType === "word" || file.fileType === "pdf" ? "textBlocks" : "table",
     sheetMode: "all",
     headerRow,
     dataStartRow: headerRow + 1,
@@ -298,6 +333,11 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
       })
       .filter((mapping) => mapping.source)
       .map((mapping) => mapping.target === "quantity" ? { ...mapping, transform: "number" as const } : mapping),
+    matrix: hasSkuColumns && hasStoreMatrix ? {
+      fixedFields: ["SKU名称", "SKU条码", "规格"],
+      valueColumnsStartAt: matrixStart + 2,
+      columnHeaderAs: "storeName"
+    } : undefined,
     skipPatterns: ["合计", "总计"],
     createdBy: "ai",
     updatedAt: new Date().toISOString()
