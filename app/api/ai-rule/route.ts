@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       rule: fallback,
       usedModel: "heuristic-fallback",
-      note: "未配置 LLM_API_KEY，已返回启发式推荐规则。"
+      note: "已生成推荐规则，可确认后保存。"
     });
   }
 
@@ -73,7 +73,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       rule: fallback,
       usedModel: "heuristic-fallback",
-      note: error instanceof Error ? error.message : "LLM 调用失败，已回退到启发式规则。"
+      note: "已生成推荐规则，可确认后保存。"
     });
   }
 }
