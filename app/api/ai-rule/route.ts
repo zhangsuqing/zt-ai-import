@@ -66,6 +66,7 @@ const defaultCardRule: NonNullable<ParseRule["card"]> = {
 };
 
 const normalizeCell = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+const stockMetricPattern = /总和|库存|可用|待移入|分配|冻结|结余|状态|单位|仓库|货主/;
 
 const detectsCardSheet = (file: ExtractedFile) =>
   file.sheets.some((sheet) =>
@@ -81,7 +82,7 @@ const detectsMatrixSheet = (file: ExtractedFile) => {
   const markerIndex = headers.findIndex((header) => normalizeCell(header).includes("待移入数") || normalizeCell(header).includes("冻结数量"));
   const hasStoreColumns = markerIndex >= 0 && headers.slice(markerIndex + 1).some((header) => {
     const text = normalizeCell(header);
-    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+    return text && !stockMetricPattern.test(text);
   });
   return hasSku && hasStoreColumns;
 };
@@ -92,6 +93,7 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
   const headers = file.sheets[0]?.rows[headerRowIndex]?.map((cell) => String(cell ?? "").trim()) ?? [];
   const detectedSourceKind: SourceKind = detectsCardSheet(file) ? "cards" : detectsMatrixSheet(file) ? "matrix" : fallback.sourceKind;
   const isCardRule = detectedSourceKind === "cards";
+  const isMatrixRule = detectedSourceKind === "matrix";
   const mappings = Array.isArray(generated.mappings)
     ? generated.mappings
         .map((mapping) => {
@@ -100,6 +102,10 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
           const target = item.field ? labelToField[item.field] : undefined;
           const source = typeof item.column === "number" ? headers[item.column] : undefined;
           return target && source ? { target, source, guessed: true, confidence: 0.65 } satisfies FieldMapping : null;
+        })
+        .filter((mapping) => {
+          if (!mapping || !isMatrixRule || mapping.target !== "externalCode") return true;
+          return !/SKU|商品|条码|物品/.test(mapping.source);
         })
         .filter((mapping): mapping is FieldMapping => Boolean(mapping))
     : [];
@@ -112,9 +118,9 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
     sheetMode: generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
     headerRow: isCardRule ? undefined : typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
     dataStartRow: isCardRule ? undefined : typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
-    groupBy: canonicalFields.includes(generated.groupBy as CanonicalField) ? generated.groupBy as CanonicalField : fallback.groupBy,
+    groupBy: isMatrixRule ? fallback.groupBy : canonicalFields.includes(generated.groupBy as CanonicalField) ? generated.groupBy as CanonicalField : fallback.groupBy,
     mappings: isCardRule ? [] : mappings.length ? mappings : fallback.mappings,
-    matrix: generated.matrix?.columnHeaderAs === "storeName" || generated.matrix?.columnHeaderAs === "date" ? generated.matrix : fallback.matrix,
+    matrix: isMatrixRule ? fallback.matrix : generated.matrix?.columnHeaderAs === "storeName" || generated.matrix?.columnHeaderAs === "date" ? generated.matrix : fallback.matrix,
     card: isCardRule ? fallback.card ?? defaultCardRule : generated.card ?? fallback.card,
     textBlock: generated.textBlock ?? fallback.textBlock,
     skipPatterns: Array.isArray(generated.skipPatterns) ? generated.skipPatterns.filter((item) => typeof item === "string") : fallback.skipPatterns,

@@ -9,6 +9,8 @@ const asNumber = (value: RawCell) => {
 
 const hasText = (row: RawCell[]) => row.some((cell) => normalize(cell));
 
+const stockMetricPattern = /总和|库存|可用|待移入|分配|冻结|结余|状态|单位|仓库|货主/;
+
 const findColumn = (headers: RawCell[], source: string) => {
   const wanted = source.toLowerCase();
   const exact = headers.findIndex((header) => normalize(header).toLowerCase() === wanted);
@@ -70,8 +72,13 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   if (!sheet) return [];
   const headerIndex = Math.max((rule.headerRow ?? 1) - 1, 0);
   const headers = sheet.rows[headerIndex] ?? [];
-  const inferredStart = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
-  const valueStart = rule.matrix?.valueColumnsStartAt ?? (inferredStart >= 0 ? inferredStart + 2 : 2);
+  const inferredStart = headers.findIndex((header, index) => {
+    const text = normalize(header);
+    if (!text || stockMetricPattern.test(text)) return false;
+    return index > 0 && headers.slice(0, index).some((candidate) => /待移入|冻结|分配|可用|在库/.test(normalize(candidate)));
+  });
+  const configuredValueStart = rule.matrix?.valueColumnsStartAt ? Math.max(rule.matrix.valueColumnsStartAt - 1, 0) : undefined;
+  const valueStart = configuredValueStart ?? (inferredStart >= 0 ? inferredStart : 2);
   const explicitEnd = headers.findIndex((header) => normalize(header).includes("下单后结余"));
   const valueEnd = explicitEnd > valueStart ? explicitEnd : headers.length;
   const baseHeaders = headers.slice(0, valueStart);
@@ -85,7 +92,7 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
     if (!hasText(sourceRow)) return;
     headers.slice(valueStart, valueEnd).forEach((header, headerOffset) => {
       const columnName = normalize(header);
-      if (!columnName || /总和|库存|可用|分配|冻结|结余/.test(columnName)) return;
+      if (!columnName || stockMetricPattern.test(columnName)) return;
       const value = sourceRow[valueStart + headerOffset];
       if (!normalize(value)) return;
       const base = mapRow(sourceRow.slice(0, valueStart), baseHeaders, rule, sheet.name, headerIndex + 1 + offset);
@@ -94,7 +101,7 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
       rows.push({
         ...base,
         id: makeId(),
-        externalCode: base.externalCode || `${columnName}-${offset + 1}-${headerOffset + 1}`,
+        externalCode: base.externalCode,
         storeName: rule.matrix?.columnHeaderAs === "storeName" ? columnName : base.storeName,
         remark: rule.matrix?.columnHeaderAs === "date" ? `${base.remark} ${columnName}`.trim() : base.remark,
         skuCode: skuCodeCol >= 0 ? normalize(sourceRow[skuCodeCol]) : base.skuCode,
@@ -113,7 +120,7 @@ const looksLikeMatrixSheet = (file: ExtractedFile) => {
   const markerIndex = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
   const hasStoreColumns = markerIndex >= 0 && headers.slice(markerIndex + 1).some((header) => {
     const text = normalize(header);
-    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+    return text && !stockMetricPattern.test(text);
   });
   return hasSku && hasStoreColumns;
 };
@@ -316,13 +323,17 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     const normalized = headers.map((header) => normalize(header));
     const exact = normalized.find((header) => keywords.some((kw) => header === kw));
     if (exact) return exact;
-    return normalized.find((header) => keywords.some((kw) => header.includes(kw) && !/仓库|货主|库存|可用|冻结|分配|结余/.test(header))) ?? "";
+    return normalized.find((header) => keywords.some((kw) => header.includes(kw) && !stockMetricPattern.test(header))) ?? "";
   };
   const hasSkuColumns = Boolean(pick(["SKU名称"])) && Boolean(pick(["SKU条码", "外部商品编码"]));
   const matrixStart = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
-  const hasStoreMatrix = matrixStart >= 0 && headers.slice(matrixStart + 1).some((header) => {
+  const firstStoreColumn = matrixStart >= 0 ? headers.findIndex((header, index) => {
     const text = normalize(header);
-    return text && !/总和|库存|可用|冻结|分配|结余/.test(text);
+    return index > matrixStart && text && !stockMetricPattern.test(text);
+  }) : -1;
+  const hasStoreMatrix = firstStoreColumn >= 0 && headers.slice(firstStoreColumn).some((header) => {
+    const text = normalize(header);
+    return text && !stockMetricPattern.test(text);
   });
   const hasCardBlocks = looksLikeCardSheet(file);
   const mappings = [
@@ -347,7 +358,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     sheetMode: "all",
     headerRow,
     dataStartRow: headerRow + 1,
-    groupBy: "externalCode",
+    groupBy: hasSkuColumns && hasStoreMatrix ? "storeName" : "externalCode",
     mappings: mappings
       .map(([target, keys]) => {
         const source = pick(keys);
@@ -357,7 +368,7 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
       .map((mapping) => mapping.target === "quantity" ? { ...mapping, transform: "number" as const } : mapping),
     matrix: hasSkuColumns && hasStoreMatrix ? {
       fixedFields: ["SKU名称", "SKU条码", "规格"],
-      valueColumnsStartAt: matrixStart + 2,
+      valueColumnsStartAt: firstStoreColumn + 1,
       columnHeaderAs: "storeName"
     } : undefined,
     card: hasCardBlocks ? defaultCardRule : undefined,
