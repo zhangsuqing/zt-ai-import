@@ -129,10 +129,86 @@ const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
     .filter((row) => row.skuName || row.skuCode || row.storeName || row.receiverName);
 };
 
+const looksLikeCardSheet = (file: ExtractedFile) =>
+  file.sheets.some((sheet) => sheet.rows.some((row) => normalize(row[0]).includes("调拨记录") || normalize(row[0]).includes("记录 #")));
+
+const parseCardSheets = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
+  const targetSheets = rule.sheetMode === "first" ? file.sheets.slice(0, 1) : file.sheets;
+  const output: OrderRow[] = [];
+
+  targetSheets.forEach((sheet) => {
+    const rows = sheet.rows;
+    for (let index = 0; index < rows.length; index += 1) {
+      const marker = normalize(rows[index]?.[0]);
+      if (!marker.includes("调拨记录") && !marker.includes("记录 #")) continue;
+
+      const cardStart = index;
+      let cardEnd = rows.length;
+      for (let next = index + 1; next < rows.length; next += 1) {
+        const nextMarker = normalize(rows[next]?.[0]);
+        if (nextMarker.includes("调拨记录") || nextMarker.includes("记录 #")) {
+          cardEnd = next;
+          break;
+        }
+      }
+
+      const cardRows = rows.slice(cardStart, cardEnd);
+      const infoRow = cardRows.find((row) => row.some((cell) => normalize(cell) === "调入门店" || normalize(cell) === "收货人" || normalize(cell) === "电话")) ?? [];
+      const addressRow = cardRows.find((row) => row.some((cell) => normalize(cell) === "收货地址")) ?? [];
+      const headerOffset = cardRows.findIndex((row) => row.some((cell) => normalize(cell) === "物品编码") && row.some((cell) => normalize(cell) === "数量"));
+      if (headerOffset < 0) continue;
+
+      const valueAfter = (row: RawCell[], label: string) => {
+        const labelIndex = row.findIndex((cell) => normalize(cell) === label);
+        return labelIndex >= 0 ? normalize(row[labelIndex + 1]) : "";
+      };
+      const storeName = valueAfter(infoRow, "调入门店");
+      const receiverName = valueAfter(infoRow, "收货人");
+      const receiverPhone = valueAfter(infoRow, "电话");
+      const receiverAddress = valueAfter(addressRow, "收货地址");
+      const externalCode = marker.match(/#\s*([A-Za-z0-9-]+)/)?.[1] ? `CARD-${marker.match(/#\s*([A-Za-z0-9-]+)/)?.[1]}` : "";
+      const headers = cardRows[headerOffset];
+      const col = (label: string) => headers.findIndex((cell) => normalize(cell) === label);
+      const codeCol = col("物品编码");
+      const nameCol = col("物品名称");
+      const specCol = col("规格");
+      const qtyCol = col("数量");
+
+      cardRows.slice(headerOffset + 1).forEach((row, offset) => {
+        const skuCode = normalize(row[codeCol]);
+        const skuName = normalize(row[nameCol]);
+        const quantity = asNumber(row[qtyCol]);
+        if (!skuCode && !skuName && !quantity) return;
+        output.push(applyStaticValues({
+          id: makeId(),
+          externalCode,
+          storeName,
+          receiverName,
+          receiverPhone,
+          receiverAddress,
+          skuCode,
+          skuName,
+          quantity,
+          skuSpec: normalize(row[specCol]),
+          temperature: "",
+          remark: marker,
+          sourceSheet: sheet.name,
+          sourceRow: cardStart + headerOffset + offset + 2
+        }, rule));
+      });
+
+      index = cardEnd - 1;
+    }
+  });
+
+  return output;
+};
+
 export const parseWithRule = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const rows = (() => {
     if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
-    if (rule.sourceKind === "textBlocks" || rule.sourceKind === "cards") return parseTextBlocks(file, rule);
+    if (rule.sourceKind === "cards" || looksLikeCardSheet(file)) return parseCardSheets(file, rule);
+    if (rule.sourceKind === "textBlocks") return parseTextBlocks(file, rule);
     return parseTable(file, rule);
   })();
   return shareReceivingInfoByExternalCode(rows);
