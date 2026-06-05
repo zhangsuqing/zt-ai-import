@@ -65,8 +65,6 @@ export default function Page() {
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState("");
   const [activeTab, setActiveTab] = useState<"import" | "history">("import");
-  const [auditStatus, setAuditStatus] = useState("全部");
-  const [effectStatus, setEffectStatus] = useState("全部");
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -213,10 +211,6 @@ export default function Page() {
     setTimeout(() => setProgress(0), 800);
   }
 
-  function quickAction(name: string) {
-    toast.info(`${name}：演示环境已响应`);
-  }
-
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -249,20 +243,6 @@ export default function Page() {
         </div>
 
         <section className="content">
-          <div className="panel filter-panel">
-            <div className="segmented">
-              <span>审核状态</span>{["全部", "未审核", "审核通过", "审核驳回"].map((item) => <button key={item} className={auditStatus === item ? "active" : ""} onClick={() => setAuditStatus(item)}>{item}</button>)}
-              <span style={{ marginLeft: "auto" }}>生效状态</span>{["全部", "未生效", "生效中", "已失效"].map((item) => <button key={item} className={effectStatus === item ? "active" : ""} onClick={() => setEffectStatus(item)}>{item}</button>)}
-            </div>
-            <div className="filter-grid">
-              <div className="field"><label>报价编码</label><input className="input" placeholder="请输入" /></div>
-              <div className="field"><label>报价名称</label><input className="input" placeholder="请输入" /></div>
-              <div className="field"><label>生效区间</label><input className="input" placeholder="开始日期 - 结束日期" /></div>
-              <div className="field"><label>结算流向</label><select className="select"><option>请选择</option></select></div>
-              <div className="toolbar-group"><button className="btn primary" onClick={() => toast.success("筛选条件已应用")}>查询</button><button className="btn" onClick={() => { setAuditStatus("全部"); setEffectStatus("全部"); toast.info("已重置"); }}>重置</button><button className="btn soft" onClick={() => quickAction("收起")}>收起</button></div>
-            </div>
-          </div>
-
           {activeTab === "import" && <div className="grid-2">
             <div className="panel rule-editor">
               <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(event.dataTransfer.files); }}>
