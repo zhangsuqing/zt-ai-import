@@ -67,6 +67,7 @@ export default function Page() {
   const [activeTab, setActiveTab] = useState<"import" | "history">("import");
   const [rawInfo, setRawInfo] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
+  const [previewPage, setPreviewPage] = useState(1);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -207,6 +208,7 @@ export default function Page() {
         return;
       }
       setRows(parsed);
+      setPreviewPage(1);
       setProgress(100);
       toast.success(`解析完成 ${parsed.length} 行，用时 ${Math.round(performance.now() - start)}ms`);
     } catch {
@@ -257,6 +259,9 @@ export default function Page() {
   const pageSize = 10;
   const totalHistoryPages = Math.max(1, Math.ceil(history.length / pageSize));
   const pagedHistory = history.slice((historyPage - 1) * pageSize, historyPage * pageSize);
+  const previewPageSize = 100;
+  const totalPreviewPages = Math.max(1, Math.ceil(rows.length / previewPageSize));
+  const pagedRows = rows.slice((previewPage - 1) * previewPageSize, previewPage * previewPageSize);
 
   return (
     <div className="app-shell">
@@ -339,17 +344,23 @@ export default function Page() {
           {activeTab === "import" && <div className="panel">
             <div className="toolbar">
               <div className="toolbar-group">
-                <button className="btn primary" onClick={() => setRows((current) => [emptyOrderRow(), ...current])}><Plus size={15} />新增</button>
+                <button className="btn primary" onClick={() => { setRows((current) => [emptyOrderRow(), ...current]); setPreviewPage(1); }}><Plus size={15} />新增</button>
                 <button className="btn danger" onClick={() => setRows((current) => current.slice(1))}><Trash2 size={15} />删除首行</button>
                 <button className="btn soft" onClick={exportExcel} disabled={!rows.length}><ArrowDownToLine size={15} />导出Excel</button>
                 <button className="btn primary" onClick={submitOrders} disabled={Boolean(busy) || errors.length > 0 || rows.length === 0}><Send size={15} />提交下单</button>
               </div>
               <div className="toolbar-group">
                 <span className={`status-pill ${errors.length ? "bad" : "ok"}`}>{errors.length ? `${errors.length} 个错误` : "校验通过"}</span>
-                <span className="muted">共 {rows.length} 条</span>
+                <span className="muted">共 {rows.length} 条 · 每页渲染 {previewPageSize} 条</span>
               </div>
             </div>
-            <EditableTable rows={rows} errors={errorMap} onChange={updateCell} onDelete={deleteRow} />
+            <EditableTable rows={pagedRows} errors={errorMap} onChange={updateCell} onDelete={deleteRow} startIndex={(previewPage - 1) * previewPageSize} />
+            <div className="pager">
+              <span>预览 {rows.length} 条</span>
+              <button className="btn" disabled={previewPage <= 1} onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}>上一页</button>
+              <span>{previewPage} / {totalPreviewPages}</span>
+              <button className="btn" disabled={previewPage >= totalPreviewPages} onClick={() => setPreviewPage((page) => Math.min(totalPreviewPages, page + 1))}>下一页</button>
+            </div>
             {errors.length > 0 && (
               <div className="error-list">
                 {errors.map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 · {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}
@@ -385,7 +396,7 @@ export default function Page() {
   );
 }
 
-function EditableTable({ rows, errors, onChange, onDelete }: { rows: OrderRow[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void }) {
+function EditableTable({ rows, errors, onChange, onDelete, startIndex = 0 }: { rows: OrderRow[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void; startIndex?: number }) {
   if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
   return (
     <div className="table-wrap">
@@ -398,7 +409,7 @@ function EditableTable({ rows, errors, onChange, onDelete }: { rows: OrderRow[];
             const rowErrors = errors.get(row.id);
             return (
               <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
-                <td>{index + 1}</td>
+                <td>{startIndex + index + 1}</td>
                 <td><span className={`status-pill ${rowErrors?.size ? "bad" : "ok"}`}>{rowErrors?.size ? "待修正" : "有效"}</span></td>
                 {editableFields.map((field) => (
                   <td key={field} className={rowErrors?.has(field) || rowErrors?.has("row") ? "error-cell" : ""}>
