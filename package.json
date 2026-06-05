@@ -1,0 +1,30 @@
+{
+  "name": "zt-ai-import",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@vercel/postgres": "^0.10.0",
+    "lucide-react": "^0.468.0",
+    "mammoth": "^1.8.0",
+    "next": "^15.0.3",
+    "pdfjs-dist": "^4.8.69",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sonner": "^1.7.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.2",
+    "eslint": "^9.16.0",
+    "eslint-config-next": "^15.0.3",
+    "typescript": "^5.7.2"
+  }
+}
