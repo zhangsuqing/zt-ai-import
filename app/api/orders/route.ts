@@ -22,3 +22,11 @@ export async function POST(request: NextRequest) {
     database: store.isDatabaseEnabled()
   });
 }
+
+export async function DELETE() {
+  await store.clearOrders();
+  return NextResponse.json({
+    success: true,
+    database: store.isDatabaseEnabled()
+  });
+}

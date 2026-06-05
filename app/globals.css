@@ -495,6 +495,32 @@ button {
   min-width: 760px;
 }
 
+.history-wrap table {
+  min-width: 1180px;
+}
+
+.history-order-row td {
+  font-weight: 600;
+  background: #fbfdfe;
+}
+
+.history-detail-row td {
+  height: auto;
+  padding: 0;
+  background: #f6f8fa;
+}
+
+.history-detail-table {
+  min-width: 760px;
+  font-size: 12px;
+}
+
+.history-detail-table th,
+.history-detail-table td {
+  height: 34px;
+  background: #fff;
+}
+
 table {
   border-collapse: separate;
   border-spacing: 0;
@@ -529,6 +555,12 @@ td input {
   border: 0;
   outline: 0;
   background: transparent;
+}
+
+.readonly-cell {
+  display: inline-block;
+  min-width: 110px;
+  color: #4f5b66;
 }
 
 tr.error-row td {

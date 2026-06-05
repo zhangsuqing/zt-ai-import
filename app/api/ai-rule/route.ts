@@ -87,6 +87,13 @@ const detectsMatrixSheet = (file: ExtractedFile) => {
   return hasSku && hasStoreColumns;
 };
 
+const hasStructuredTableHeader = (headers: string[]) => {
+  const hasCode = headers.some((header) => /物品编码|SKU物品编码|商品编码|SKU条码|外部商品编码/.test(header));
+  const hasName = headers.some((header) => /物品名称|SKU物品名称|商品名称|SKU名称/.test(header));
+  const hasQuantity = headers.some((header) => /发货数量|出库数量|订货数量|数量/.test(header));
+  return hasCode && hasName && hasQuantity;
+};
+
 const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRule> | null, file: ExtractedFile): ParseRule => {
   if (!generated) return fallback;
   const headerRowIndex = Math.max((fallback.headerRow ?? 1) - 1, 0);
@@ -94,6 +101,8 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
   const detectedSourceKind: SourceKind = detectsCardSheet(file) ? "cards" : detectsMatrixSheet(file) ? "matrix" : fallback.sourceKind;
   const isCardRule = detectedSourceKind === "cards";
   const isMatrixRule = detectedSourceKind === "matrix";
+  const isTextBlockRule = detectedSourceKind === "textBlocks";
+  const keepFallbackTableShape = detectedSourceKind === "table" && hasStructuredTableHeader(headers);
   const mappings = Array.isArray(generated.mappings)
     ? generated.mappings
         .map((mapping) => {
@@ -115,11 +124,11 @@ const normalizeGeneratedRule = (fallback: ParseRule, generated: Partial<ParseRul
     name: typeof generated.name === "string" ? generated.name : fallback.name,
     description: typeof generated.description === "string" ? generated.description : fallback.description,
     sourceKind: detectedSourceKind,
-    sheetMode: generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
-    headerRow: isCardRule ? undefined : typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
-    dataStartRow: isCardRule ? undefined : typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
+    sheetMode: keepFallbackTableShape ? fallback.sheetMode : generated.sheetMode === "first" || generated.sheetMode === "all" ? generated.sheetMode : fallback.sheetMode,
+    headerRow: isCardRule ? undefined : keepFallbackTableShape ? fallback.headerRow : typeof generated.headerRow === "number" && generated.headerRow >= 1 ? generated.headerRow : fallback.headerRow,
+    dataStartRow: isCardRule ? undefined : keepFallbackTableShape ? fallback.dataStartRow : typeof generated.dataStartRow === "number" && generated.dataStartRow >= 1 ? generated.dataStartRow : fallback.dataStartRow,
     groupBy: isMatrixRule ? fallback.groupBy : canonicalFields.includes(generated.groupBy as CanonicalField) ? generated.groupBy as CanonicalField : fallback.groupBy,
-    mappings: isCardRule ? [] : mappings.length ? mappings : fallback.mappings,
+    mappings: isCardRule || isTextBlockRule ? fallback.mappings : mappings.length ? mappings : fallback.mappings,
     matrix: isMatrixRule ? fallback.matrix : generated.matrix?.columnHeaderAs === "storeName" || generated.matrix?.columnHeaderAs === "date" ? generated.matrix : fallback.matrix,
     card: isCardRule ? fallback.card ?? defaultCardRule : generated.card ?? fallback.card,
     textBlock: generated.textBlock ?? fallback.textBlock,

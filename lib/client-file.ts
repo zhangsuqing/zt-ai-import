@@ -47,10 +47,10 @@ async function extractWord(file: File): Promise<ExtractedFile> {
 }
 
 async function extractPdf(file: File): Promise<ExtractedFile> {
-  const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/legacy/build/pdf.worker.min.mjs", import.meta.url).toString();
   const buffer = await file.arrayBuffer();
-  const doc = await pdfjs.getDocument({ data: buffer }).promise;
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
   const lines: string[] = [];
   for (let pageNo = 1; pageNo <= doc.numPages; pageNo += 1) {
     const page = await doc.getPage(pageNo);

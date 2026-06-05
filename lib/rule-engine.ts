@@ -10,6 +10,7 @@ const asNumber = (value: RawCell) => {
 const hasText = (row: RawCell[]) => row.some((cell) => normalize(cell));
 
 const stockMetricPattern = /总和|库存|可用|待移入|分配|冻结|结余|状态|单位|仓库|货主/;
+const itemHeaderPattern = /物品编码|SKU物品编码|商品编码|物品名称|SKU物品名称|商品名称|发货数量|出库数量|数量/;
 
 const findColumn = (headers: RawCell[], source: string) => {
   const wanted = source.toLowerCase();
@@ -23,7 +24,90 @@ const makeId = () => {
   return Math.random().toString(36).slice(2);
 };
 
+const makeExternalCode = () => `AI-${makeId().replace(/-/g, "").slice(0, 10).toUpperCase()}`;
+
+const collectSourceValues = (sourceRow: RawCell[], headers: RawCell[], fields: string[] = []) => {
+  const output: Record<string, string | number> = {};
+  fields.forEach((field) => {
+    const idx = headers.findIndex((header) => normalize(header) === field);
+    if (idx < 0) return;
+    const value = sourceRow[idx];
+    const normalized = normalize(value);
+    if (!normalized) return;
+    output[field] = typeof value === "number" ? value : normalized;
+  });
+  return output;
+};
+
 const applyStaticValues = (row: OrderRow, rule: ParseRule) => ({ ...row, ...(rule.staticValues ?? {}) });
+
+const findHeaderRowIndex = (rows: RawCell[][]) => {
+  const scored = rows.map((row, index) => {
+    const cells = row.map((cell) => normalize(cell));
+    const score = [
+      cells.some((cell) => /物品编码|SKU物品编码|商品编码|SKU条码|外部商品编码/.test(cell)),
+      cells.some((cell) => /物品名称|SKU物品名称|商品名称|SKU名称/.test(cell)),
+      cells.some((cell) => /发货数量|出库数量|订货数量|数量/.test(cell))
+    ].filter(Boolean).length;
+    return { index, score };
+  }).sort((a, b) => b.score - a.score || a.index - b.index)[0];
+  return scored && scored.score >= 2 ? scored.index : Math.max(rows.findIndex((row) => row.filter((cell) => normalize(cell)).length >= 3), 0);
+};
+
+const valueAfterLabel = (rows: RawCell[][], labels: string[]) => {
+  for (const row of rows) {
+    for (let index = 0; index < row.length; index += 1) {
+      const cell = normalize(row[index]);
+      if (!labels.some((label) => cell === label || cell.replace(/[:：]$/, "") === label)) continue;
+      const inline = cell.match(/[:：]\s*(.+)$/)?.[1];
+      if (inline) return inline.trim();
+      for (let next = index + 1; next < row.length; next += 1) {
+        const value = normalize(row[next]);
+        if (value) return value;
+      }
+    }
+  }
+  return "";
+};
+
+const defaultMetaLabels: NonNullable<ParseRule["metadata"]>["labels"] = {
+  externalCode: ["单据号", "单据编号", "配送单号", "外部编码", "订单号"],
+  storeName: ["收货机构", "收货门店", "门店", "订货机构"],
+  receiverName: ["收货人", "收件人", "联系人"],
+  receiverPhone: ["收货电话", "收件人电话", "联系电话", "电话", "手机"],
+  receiverAddress: ["收货地址", "收件人地址", "地址"]
+};
+
+const inferSheetStoreName = (sheetName: string, rows: RawCell[][], metadata?: ParseRule["metadata"]) => {
+  const title = normalize(rows[0]?.[0]);
+  const labels = metadata?.labels?.storeName ?? defaultMetaLabels.storeName ?? [];
+  const explicit = valueAfterLabel(rows, labels);
+  if (!metadata?.preferTitleStore && explicit) return explicit;
+  const pattern = metadata?.titleStorePattern ?? "^(.+?)(?:出库单|配送发货单|配送单)";
+  const titleStore = title.match(new RegExp(pattern))?.[1]?.trim();
+  if (titleStore && (metadata?.preferTitleStore || !explicit)) return titleStore;
+  if (explicit) return explicit;
+  return sheetName;
+};
+
+const inferSheetExternalCode = (sheetName: string, rows: RawCell[][], metadata?: ParseRule["metadata"]) => {
+  const labels = metadata?.labels?.externalCode ?? defaultMetaLabels.externalCode ?? [];
+  const explicit = valueAfterLabel(rows, labels);
+  if (explicit) return explicit;
+  const title = normalize(rows[0]?.[0]);
+  const pattern = metadata?.titleExternalCodePattern ?? "(PS\\d+)";
+  const titleCode = title.match(new RegExp(pattern, "i"))?.[1];
+  if (titleCode) return titleCode;
+  return metadata?.sheetNameAsExternalCode ? `SHEET-${sheetName}` : "";
+};
+
+const inferSheetMeta = (sheetName: string, rows: RawCell[][], metadata?: ParseRule["metadata"]) => ({
+  externalCode: inferSheetExternalCode(sheetName, rows, metadata),
+  storeName: inferSheetStoreName(sheetName, rows, metadata),
+  receiverName: valueAfterLabel(rows, metadata?.labels?.receiverName ?? defaultMetaLabels.receiverName ?? []),
+  receiverPhone: valueAfterLabel(rows, metadata?.labels?.receiverPhone ?? defaultMetaLabels.receiverPhone ?? []),
+  receiverAddress: valueAfterLabel(rows, metadata?.labels?.receiverAddress ?? defaultMetaLabels.receiverAddress ?? [])
+});
 
 const mapRow = (sourceRow: RawCell[], headers: RawCell[], rule: ParseRule, sheetName: string, rowIndex: number): OrderRow => {
   const row: OrderRow = {
@@ -60,10 +144,22 @@ const parseTable = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
     const headerIndex = Math.max((rule.headerRow ?? 1) - 1, 0);
     const startIndex = Math.max((rule.dataStartRow ?? headerIndex + 2) - 1, headerIndex + 1);
     const headers = sheet.rows[headerIndex] ?? [];
+    const meta = inferSheetMeta(sheet.name, sheet.rows, rule.metadata);
     const rows = sheet.rows.slice(startIndex).filter(hasText);
     return rows
       .filter((row) => !rule.skipPatterns?.some((pattern) => normalize(row.join(" ")).includes(pattern)))
-      .map((row, offset) => mapRow(row, headers, rule, sheet.name, startIndex + offset));
+      .map((row, offset) => {
+        const mapped = mapRow(row, headers, rule, sheet.name, startIndex + offset);
+        return {
+          ...mapped,
+          externalCode: mapped.externalCode || meta.externalCode,
+          storeName: mapped.storeName || meta.storeName,
+          receiverName: mapped.receiverName || meta.receiverName,
+          receiverPhone: mapped.receiverPhone || meta.receiverPhone,
+          receiverAddress: mapped.receiverAddress || meta.receiverAddress
+        };
+      })
+      .filter((row) => row.skuCode && row.skuName && Number(row.quantity) > 0);
   });
 };
 
@@ -88,12 +184,27 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const skuCodeCol = headerIndexOf(["SKU条码", "外部商品编码", "SKU物品编码", "商品编码"]);
   const skuSpecCol = headerIndexOf(["规格", "SKU规格型号", "规格型号"]);
   const groupByIndexes = rule.matrix?.groupByFields?.map((field) => headers.findIndex((header) => normalize(header) === field)).filter((index) => index >= 0) ?? [];
+  const groupCodes = new Map<string, string>();
+  const preserveFields = rule.matrix?.preserveFields ?? headers.slice(0, valueStart).map((header) => normalize(header)).filter(Boolean);
+  const allSourceFields = headers.map((header) => normalize(header)).filter(Boolean);
 
   sheet.rows.slice(headerIndex + 1).forEach((sourceRow, offset) => {
     if (!hasText(sourceRow)) return;
     const groupValues = groupByIndexes.map((index) => normalize(sourceRow[index])).filter(Boolean);
     const matrixGroupKey = groupValues.join("-");
     const matrixReceiverName = groupValues[groupValues.length - 1] || matrixGroupKey;
+    const externalCode = (() => {
+      if (rule.matrix?.externalCodeStrategy === "randomPerGroup") {
+        const key = matrixGroupKey || `${sheet.name}-${offset + 1}`;
+        const existing = groupCodes.get(key);
+        if (existing) return existing;
+        const created = makeExternalCode();
+        groupCodes.set(key, created);
+        return created;
+      }
+      return "";
+    })();
+    const preserved = collectSourceValues(sourceRow, headers, allSourceFields);
     headers.slice(valueStart, valueEnd).forEach((header, headerOffset) => {
       const columnName = normalize(header);
       if (!columnName || stockMetricPattern.test(columnName)) return;
@@ -105,13 +216,18 @@ const parseMatrix = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
       rows.push({
         ...base,
         id: makeId(),
-        externalCode: base.externalCode || matrixGroupKey,
+        externalCode: base.externalCode || externalCode || matrixGroupKey,
         storeName: base.storeName || matrixReceiverName || (rule.matrix?.columnHeaderAs === "storeName" ? columnName : ""),
         remark: [base.remark, columnName].filter(Boolean).join(" "),
         skuCode: skuCodeCol >= 0 ? normalize(sourceRow[skuCodeCol]) : base.skuCode,
         skuName: skuNameCol >= 0 ? normalize(sourceRow[skuNameCol]) : base.skuName,
         skuSpec: skuSpecCol >= 0 ? normalize(sourceRow[skuSpecCol]) : base.skuSpec,
-        quantity: quantity || normalize(value)
+        quantity: quantity || normalize(value),
+        sourceValues: {
+          ...preserved,
+          "门店列": columnName,
+          "门店数量": quantity || normalize(value)
+        }
       });
     });
   });
@@ -130,6 +246,9 @@ const looksLikeMatrixSheet = (file: ExtractedFile) => {
 };
 
 const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
+  const deliveryRows = parseDeliveryText(file, rule);
+  if (deliveryRows.length) return deliveryRows;
+
   const separator = rule.textBlock?.blockSeparator ? new RegExp(rule.textBlock.blockSeparator, "g") : /\n-{3,}\n/g;
   return file.text
     .split(separator)
@@ -161,6 +280,50 @@ const parseTextBlocks = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
       );
     })
     .filter((row) => row.skuName || row.skuCode || row.storeName || row.receiverName);
+};
+
+const splitSkuNameAndSpec = (value: string) => {
+  const text = value.replace(/\s+/g, " ").trim();
+  const match = text.match(/^(.+?)\s+((?:\d|[A-Z]+码|均码|L码|XL码|2XL码|3XL码|4XL码).*)$/i);
+  if (!match) return { skuName: text, skuSpec: "" };
+  return { skuName: match[1].trim(), skuSpec: match[2].trim() };
+};
+
+const parseDeliveryText = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
+  const text = file.text.replace(/\s+/g, " ").trim();
+  if (!text || !/(单据编号|配送单|物品编码|发货数量)/.test(text)) return [];
+
+  const externalCode = text.match(/单据编号[:：]\s*([A-Za-z0-9-]+)/)?.[1] ?? "";
+  const storeName = text.match(/收货机构[:：]\s*(.+?)\s+(?:订货机构|供货机构|送货机构|业务模式)[:：]/)?.[1]?.trim() ?? "";
+  const receiverName = text.match(/收货人[:：]\s*(.+?)\s+收货电话[:：]/)?.[1]?.trim() ?? "";
+  const receiverPhone = text.match(/收货电话[:：]\s*([0-9\-]+)/)?.[1] ?? "";
+  const receiverAddress = text.match(/收货地址[:：]\s*(.+?)\s+(?:打印次数|备注|物品类别|第\d+页|$)/)?.[1]?.trim() ?? "";
+  const output: OrderRow[] = [];
+  const itemPattern = /(?:^|\s)(\d{1,4})\s+([\u4e00-\u9fa5A-Za-z0-9（）()]+)\s+([A-Za-z0-9-]{3,})\s+(.+?)\s+(件|瓶|包|桶|盒|袋|个|箱|套)\s+(\d+(?:\.\d+)?)(?=\s+\d{1,4}\s+[\u4e00-\u9fa5A-Za-z0-9（）()]+\s+[A-Za-z0-9-]{3,}|\s+合\s*计|\s+物品类别|\s+第\d+页|$)/g;
+
+  for (const match of text.matchAll(itemPattern)) {
+    const [, rowNo, category, skuCode, nameAndSpec, unit, quantity] = match;
+    if (!skuCode || !nameAndSpec || !quantity) continue;
+    const { skuName, skuSpec } = splitSkuNameAndSpec(nameAndSpec);
+    output.push(applyStaticValues({
+      id: makeId(),
+      externalCode,
+      storeName,
+      receiverName,
+      receiverPhone,
+      receiverAddress,
+      skuCode,
+      skuName,
+      quantity,
+      skuSpec,
+      temperature: "",
+      remark: [category, unit].filter(Boolean).join(" / "),
+      sourceSheet: file.fileType,
+      sourceRow: Number(rowNo) || output.length + 1
+    }, rule));
+  }
+
+  return output;
 };
 
 const looksLikeCardSheet = (file: ExtractedFile) =>
@@ -261,9 +424,19 @@ const parseCardSheets = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
 
 export const parseWithRule = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
   const rows = (() => {
-    if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
-    if (looksLikeMatrixSheet(file)) return parseMatrix(file, { ...rule, sourceKind: "matrix", matrix: rule.matrix ?? { fixedFields: ["SKU名称", "SKU条码", "规格"], columnHeaderAs: "storeName" } });
     if (rule.sourceKind === "cards" || looksLikeCardSheet(file)) return parseCardSheets(file, rule);
+    if (rule.sourceKind === "matrix") return parseMatrix(file, rule);
+    if (looksLikeMatrixSheet(file)) return parseMatrix(file, {
+      ...rule,
+      sourceKind: "matrix",
+      matrix: rule.matrix ?? {
+        fixedFields: ["SKU名称", "SKU条码", "规格"],
+        groupByFields: ["仓库名称", "货主名称"],
+        preserveFields: (file.sheets[0]?.rows[rule.headerRow ? rule.headerRow - 1 : 0] ?? []).map((header) => normalize(header)).filter(Boolean),
+        externalCodeStrategy: "randomPerGroup",
+        columnHeaderAs: "storeName"
+      }
+    });
     if (rule.sourceKind === "textBlocks") return parseTextBlocks(file, rule);
     return parseTable(file, rule);
   })();
@@ -320,16 +493,22 @@ export const validateRows = (rows: OrderRow[], existingCodes: string[] = []): Va
 export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
   const sheet = file.sheets[0];
   const rows = sheet?.rows ?? [];
-  let headerRow = rows.findIndex((row) => row.filter((cell) => normalize(cell)).length >= 3) + 1;
-  if (headerRow <= 0) headerRow = 1;
+  const headerRowIndex = findHeaderRowIndex(rows);
+  let headerRow = headerRowIndex + 1;
   const headers = rows[headerRow - 1] ?? [];
   const pick = (keywords: readonly string[]) => {
     const normalized = headers.map((header) => normalize(header));
-    const exact = normalized.find((header) => keywords.some((kw) => header === kw));
-    if (exact) return exact;
-    return normalized.find((header) => keywords.some((kw) => header.includes(kw) && !stockMetricPattern.test(header))) ?? "";
+    for (const keyword of keywords) {
+      const exact = normalized.find((header) => header === keyword);
+      if (exact) return exact;
+    }
+    for (const keyword of keywords) {
+      const fuzzy = normalized.find((header) => header.includes(keyword) && !stockMetricPattern.test(header));
+      if (fuzzy) return fuzzy;
+    }
+    return "";
   };
-  const hasSkuColumns = Boolean(pick(["SKU名称"])) && Boolean(pick(["SKU条码", "外部商品编码"]));
+  const hasSkuColumns = Boolean(pick(["SKU名称", "物品名称", "商品名称"])) && Boolean(pick(["SKU条码", "外部商品编码", "物品编码", "商品编码"]));
   const matrixStart = headers.findIndex((header) => normalize(header).includes("待移入数") || normalize(header).includes("冻结数量"));
   const firstStoreColumn = matrixStart >= 0 ? headers.findIndex((header, index) => {
     const text = normalize(header);
@@ -340,16 +519,30 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     return text && !stockMetricPattern.test(text);
   });
   const hasCardBlocks = looksLikeCardSheet(file);
+  const isTextDocument = file.fileType === "word" || file.fileType === "pdf" || file.fileType === "text";
+  const metadata: ParseRule["metadata"] = isTextDocument || hasStoreMatrix ? undefined : {
+    labels: {
+      externalCode: ["单据号", "单据编号", "配送单号", "外部编码", "订单号"],
+      storeName: ["收货机构", "收货门店", "门店", "订货机构"],
+      receiverName: ["收货人", "收件人", "联系人"],
+      receiverPhone: ["收货电话", "收件人电话", "联系电话", "电话", "手机"],
+      receiverAddress: ["收货地址", "收件人地址", "地址"]
+    },
+    titleStorePattern: "^(.+?)(?:出库单|配送发货单|配送单)",
+    titleExternalCodePattern: "(PS\\d+)",
+    sheetNameAsExternalCode: file.sheets.length > 1,
+    preferTitleStore: file.sheets.length > 1
+  };
   const mappings = [
-    ["externalCode", ["外部编码", "配送单号", "单号", "订单号"]],
-    ["storeName", ["门店", "店铺", "机构"]],
+    ["externalCode", ["外部编码", "配送单号", "单据号", "单据编号", "单号", "订单号"]],
+    ["storeName", ["收货门店", "收货机构", "门店", "店铺", "机构"]],
     ["receiverName", ["收件人", "联系人", "姓名"]],
     ["receiverPhone", ["电话", "手机", "联系方式"]],
     ["receiverAddress", ["地址"]],
-    ["skuCode", ["SKU物品编码", "SKU条码", "外部商品编码", "物料编码", "商品编码"]],
-    ["skuName", ["SKU物品名称", "SKU名称", "物品名称", "商品名称", "品名"]],
-    ["quantity", ["数量", "件数", "发货数量"]],
-    ["skuSpec", ["规格", "型号"]],
+    ["skuCode", ["SKU物品编码", "物品编码", "SKU条码", "外部商品编码", "物料编码", "商品编码"]],
+    ["skuName", ["SKU物品名称", "物品名称", "SKU名称", "商品名称", "品名"]],
+    ["quantity", ["SKU发货数量", "发货数量", "出库数量", "订货数量", "数量", "件数"]],
+    ["skuSpec", ["SKU规格型号", "规格型号", "规格", "型号"]],
     ["temperature", ["温区"]],
     ["remark", ["备注"]]
   ] as const;
@@ -363,20 +556,27 @@ export const makeHeuristicRule = (file: ExtractedFile): ParseRule => {
     headerRow,
     dataStartRow: headerRow + 1,
     groupBy: "externalCode",
-    mappings: mappings
+    metadata,
+    mappings: isTextDocument || hasCardBlocks ? [] : mappings
       .map(([target, keys]) => {
         const source = pick(keys);
         return { target, source, guessed: true, confidence: source ? 0.72 : 0.35 };
       })
       .filter((mapping) => mapping.source)
+      .filter((mapping) => !hasStoreMatrix || ["skuCode", "skuName", "skuSpec"].includes(mapping.target))
       .map((mapping) => mapping.target === "quantity" ? { ...mapping, transform: "number" as const } : mapping),
     matrix: hasSkuColumns && hasStoreMatrix ? {
       fixedFields: ["SKU名称", "SKU条码", "规格"],
       groupByFields: ["仓库名称", "货主名称"],
+      preserveFields: headers.map((header) => normalize(header)).filter(Boolean),
+      externalCodeStrategy: "randomPerGroup",
       valueColumnsStartAt: firstStoreColumn + 1,
       columnHeaderAs: "storeName"
     } : undefined,
     card: hasCardBlocks ? defaultCardRule : undefined,
+    textBlock: isTextDocument ? {
+      itemLinePattern: "delivery-note"
+    } : undefined,
     skipPatterns: ["合计", "总计"],
     createdBy: "ai",
     updatedAt: new Date().toISOString()
@@ -398,10 +598,23 @@ export const buildRulePrompt = (file: ExtractedFile) => {
   "headerRow": 1,
   "dataStartRow": 2,
   "groupBy": "externalCode",
+  "metadata": {
+    "labels": {
+      "externalCode": ["单据号","单据编号","配送单号"],
+      "storeName": ["收货机构","收货门店","订货机构"],
+      "receiverName": ["收货人","联系人"],
+      "receiverPhone": ["收货电话","联系电话"],
+      "receiverAddress": ["收货地址"]
+    },
+    "titleStorePattern": "^(.+?)(?:出库单|配送发货单|配送单)",
+    "titleExternalCodePattern": "(PS\\\\d+)",
+    "sheetNameAsExternalCode": true,
+    "preferTitleStore": true
+  },
   "mappings": [
     { "target": "skuName", "source": "SKU名称", "confidence": 0.9, "guessed": true }
   ],
-  "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "groupByFields": ["仓库名称","货主名称"], "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
+  "matrix": { "fixedFields": ["SKU名称","SKU条码","规格"], "groupByFields": ["仓库名称","货主名称"], "preserveFields": ["仓库名称","货主名称","SKU名称","SKU条码","外部商品编码","库存状态","库存单位","规格","在库数量的总和","可用数量的总和","待移入数的总和","分配数量的总和","冻结数量的总和","银泰","金银潭","金桥","门店B","门店D","下单后结余"], "externalCodeStrategy": "randomPerGroup", "valueColumnsStartAt": 14, "columnHeaderAs": "storeName" },
   "card": {
     "startMarkers": ["调拨记录", "记录 #"],
     "infoLabels": { "storeName": "调入门店", "receiverName": "收货人", "receiverPhone": "电话", "receiverAddress": "收货地址" },
@@ -412,7 +625,8 @@ export const buildRulePrompt = (file: ExtractedFile) => {
 target 只能取这些英文内部字段：externalCode, storeName, receiverName, receiverPhone, receiverAddress, skuCode, skuName, quantity, skuSpec, temperature, remark。
 source 必须是文件表头原文，例如 SKU名称、SKU条码、物品编码、数量。
 sourceKind 只能是 table、matrix、cards、textBlocks；sheetMode 只能是 first、all。
-如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始；同一笔单的聚合字段写入 matrix.groupByFields，例如 ["仓库名称","货主名称"]。
+如果收货门店、收件人、电话、地址、单据号不在明细表头行内，而是在标题、页眉、页脚或独立键值区域中，必须用 metadata.labels 和 title*Pattern 描述提取方式，不要把这些字段硬塞进 mappings。
+如果存在 SKU 行 + 门店列的横向矩阵，sourceKind 必须为 matrix，门店列从 1-based 列号 valueColumnsStartAt 开始；同一笔单的聚合字段写入 matrix.groupByFields，例如 ["仓库名称","货主名称"]；外部编码使用 matrix.externalCodeStrategy="randomPerGroup" 随机生成，同一 groupByFields 组合共用一个编码；需要在预览列表展示的原始列写入 matrix.preserveFields。
 如果每条记录由“调拨记录 #N”这类标题行、收货信息行和物品小表组成，sourceKind 必须为 cards，并用 card 描述卡片边界、收货信息标签和物品小表表头；此时 mappings 可以为空。
 目标字段中文含义：${Object.values(fieldLabels).join("、")}。
 文件名：${file.fileName}

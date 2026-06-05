@@ -111,6 +111,14 @@ export const store = {
       `;
     }
     return rows;
+  },
+  clearOrders: async () => {
+    if (!pool) {
+      orders.splice(0, orders.length);
+      return;
+    }
+    await ensureTables();
+    await pool.sql`DELETE FROM orders`;
   }
 };
 
@@ -130,5 +138,8 @@ export const memoryStore = {
   saveOrders: (rows: OrderRow[]) => {
     orders.unshift(...rows);
     return rows;
+  },
+  clearOrders: () => {
+    orders.splice(0, orders.length);
   }
 };

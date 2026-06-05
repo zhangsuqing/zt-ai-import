@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   CheckCircle2,
@@ -41,25 +41,60 @@ const previewFieldOrder: CanonicalField[] = editableFields;
 const cardReceiverFields: CanonicalField[] = ["storeName", "receiverName", "receiverPhone", "receiverAddress"];
 const cardItemFields: CanonicalField[] = ["skuCode", "skuName", "quantity", "skuSpec", "remark"];
 
-type PreviewColumn = {
-  field: CanonicalField;
-  label: string;
+type PreviewColumn =
+  | { kind: "field"; field: CanonicalField; label: string }
+  | { kind: "source"; key: string; label: string };
+
+type HistoryOrder = {
+  externalCode: string;
+  rows: OrderRow[];
+  first: OrderRow;
+  totalQuantity: number;
 };
+
+const columnKey = (column: PreviewColumn) => column.kind === "field" ? `field-${column.field}` : `source-${column.key}`;
+
+const readColumnValue = (row: OrderRow, column: PreviewColumn) =>
+  column.kind === "field" ? row[column.field] : row.sourceValues?.[column.key] ?? "";
+
+function groupHistoryRows(rows: OrderRow[]): HistoryOrder[] {
+  const groups = new Map<string, OrderRow[]>();
+  rows.forEach((row) => {
+    const key = row.externalCode || `未编码-${row.id}`;
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  });
+  return Array.from(groups.entries()).map(([externalCode, groupRows]) => ({
+    externalCode,
+    rows: groupRows,
+    first: groupRows[0],
+    totalQuantity: groupRows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
+  }));
+}
 
 function makePreviewColumns(rule: ParseRule | null, rows: OrderRow[]): PreviewColumn[] {
   const mappedFields = rule?.mappings?.map((mapping) => mapping.target) ?? [];
   const valuedFields = previewFieldOrder.filter((field) => rows.some((row) => String(row[field] ?? "").trim()));
-  const structuralFields = rule?.sourceKind === "matrix" ? ["storeName", "skuCode", "skuName", "quantity", "skuSpec"] as CanonicalField[] : [];
+  const structuralFields = rule?.sourceKind === "matrix" ? ["externalCode", "storeName", "skuCode", "skuName", "quantity", "skuSpec", "remark"] as CanonicalField[] : [];
   const selected = [...mappedFields, ...structuralFields, ...valuedFields].filter((field, index, list) => list.indexOf(field) === index);
-  return previewFieldOrder
+  const sourceKeys = rule?.sourceKind === "matrix"
+    ? [
+        ...(rule.matrix?.preserveFields ?? []),
+        ...rows.flatMap((row) => Object.keys(row.sourceValues ?? {}))
+      ].filter((key, index, list) => key && list.indexOf(key) === index)
+    : [];
+  const sourceColumns: PreviewColumn[] = sourceKeys.map((key) => ({ kind: "source", key, label: key }));
+  const fieldColumns: PreviewColumn[] = previewFieldOrder
     .filter((field) => selected.includes(field))
     .map((field) => {
       const mappingLabel = rule?.mappings?.find((mapping) => mapping.target === field)?.source;
       const matrixLabel = rule?.sourceKind === "matrix"
-        ? ({ storeName: "门店", skuCode: mappingLabel || "SKU条码", skuName: mappingLabel || "SKU名称", quantity: "数量", skuSpec: mappingLabel || "规格" } as Partial<Record<CanonicalField, string>>)[field]
+        ? ({ externalCode: "外部编码", storeName: "收货门店", skuCode: mappingLabel || "SKU条码", skuName: mappingLabel || "SKU名称", quantity: "下单数量", skuSpec: mappingLabel || "规格", remark: "门店列" } as Partial<Record<CanonicalField, string>>)[field]
         : undefined;
-      return { field, label: matrixLabel || mappingLabel || fieldLabels[field] };
+      return { kind: "field", field, label: matrixLabel || mappingLabel || fieldLabels[field] };
     });
+  return [...sourceColumns, ...fieldColumns];
 }
 
 const makeManualRule = (): ParseRule => ({
@@ -258,8 +293,8 @@ export default function Page() {
   }
 
   function exportExcel() {
-    const columns = previewColumns.length ? previewColumns : editableFields.map((field) => ({ field, label: fieldLabels[field] }));
-    const data = rows.map((row) => Object.fromEntries(columns.map((column) => [column.label, row[column.field]])));
+    const columns: PreviewColumn[] = previewColumns.length ? previewColumns : editableFields.map((field) => ({ kind: "field", field, label: fieldLabels[field] }));
+    const data = rows.map((row) => Object.fromEntries(columns.map((column) => [column.label, readColumnValue(row, column)])));
     const sheet = XLSX.utils.json_to_sheet(data);
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, "预览数据");
@@ -287,8 +322,9 @@ export default function Page() {
   }
 
   const pageSize = 10;
-  const totalHistoryPages = Math.max(1, Math.ceil(history.length / pageSize));
-  const pagedHistory = history.slice((historyPage - 1) * pageSize, historyPage * pageSize);
+  const historyOrders = useMemo(() => groupHistoryRows(history), [history]);
+  const totalHistoryPages = Math.max(1, Math.ceil(historyOrders.length / pageSize));
+  const pagedHistory = historyOrders.slice((historyPage - 1) * pageSize, historyPage * pageSize);
   const previewPageSize = 100;
   const totalPreviewPages = Math.max(1, Math.ceil(rows.length / previewPageSize));
   const pagedRows = rows.slice((previewPage - 1) * previewPageSize, previewPage * previewPageSize);
@@ -313,10 +349,10 @@ export default function Page() {
         </div>
         <div className="org-row"><Menu size={16} />总部<ChevronDown size={16} style={{ marginLeft: "auto" }} /></div>
         <div className="nav-search"><Search size={15} /><input placeholder="输入菜单名称" /></div>
-        <button className="nav-item active nav-button" onClick={() => setActiveTab("import")}>
+        <button className={`nav-item nav-button ${activeTab === "import" ? "active" : ""}`} onClick={() => setActiveTab("import")}>
           <UploadCloud size={16} />智能导入
         </button>
-        <button className="nav-item nav-button" onClick={() => setActiveTab("history")}>
+        <button className={`nav-item nav-button ${activeTab === "history" ? "active" : ""}`} onClick={() => setActiveTab("history")}>
           <ClipboardList size={16} />已导入运单
         </button>
       </aside>
@@ -424,9 +460,9 @@ export default function Page() {
                 <button className="btn primary" onClick={() => { setHistoryPage(1); void refreshHistory(keyword); }}>查询</button>
               </div>
             </div>
-            <HistoryTable rows={pagedHistory} />
+            <HistoryTable orders={pagedHistory} />
             <div className="pager">
-              <span>共 {history.length} 条</span>
+              <span>共 {historyOrders.length} 单 / {history.length} 条明细</span>
               <button className="btn" disabled={historyPage <= 1} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}>上一页</button>
               <span>{historyPage} / {totalHistoryPages}</span>
               <button className="btn" disabled={historyPage >= totalHistoryPages} onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}>下一页</button>
@@ -440,12 +476,12 @@ export default function Page() {
 
 function EditableTable({ rows, columns, errors, onChange, onDelete, startIndex = 0 }: { rows: OrderRow[]; columns: PreviewColumn[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void; startIndex?: number }) {
   if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
-  const visibleColumns = columns.length ? columns : editableFields.map((field) => ({ field, label: fieldLabels[field] }));
+  const visibleColumns: PreviewColumn[] = columns.length ? columns : editableFields.map((field) => ({ kind: "field", field, label: fieldLabels[field] }));
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>序号</th>{visibleColumns.map((column) => <th key={column.field}>{column.label}</th>)}<th>操作</th></tr>
+          <tr><th>序号</th>{visibleColumns.map((column) => <th key={columnKey(column)}>{column.label}</th>)}<th>操作</th></tr>
         </thead>
         <tbody>
           {rows.map((row, index) => {
@@ -454,8 +490,12 @@ function EditableTable({ rows, columns, errors, onChange, onDelete, startIndex =
               <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
                 <td>{startIndex + index + 1}</td>
                 {visibleColumns.map((column) => (
-                  <td key={column.field} className={rowErrors?.has(column.field) || rowErrors?.has("row") ? "error-cell" : ""}>
-                    <input value={String(row[column.field] ?? "")} onChange={(event) => onChange(row.id, column.field, event.target.value)} />
+                  <td key={columnKey(column)} className={(column.kind === "field" && (rowErrors?.has(column.field) || rowErrors?.has("row"))) ? "error-cell" : ""}>
+                    {column.kind === "field" ? (
+                      <input value={String(row[column.field] ?? "")} onChange={(event) => onChange(row.id, column.field, event.target.value)} />
+                    ) : (
+                      <span className="readonly-cell">{String(readColumnValue(row, column) ?? "")}</span>
+                    )}
                   </td>
                 ))}
                 <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
@@ -527,18 +567,47 @@ function CardPreview({ rule, rows, errors, onItemChange, onGroupChange, onDelete
   );
 }
 
-function HistoryTable({ rows }: { rows: OrderRow[] }) {
-  if (!rows.length) return <div className="empty">暂无历史运单</div>;
+function HistoryTable({ orders }: { orders: HistoryOrder[] }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  if (!orders.length) return <div className="empty">暂无历史运单</div>;
   return (
-    <div className="table-wrap" style={{ maxHeight: 320 }}>
-      <table>
-        <thead><tr><th>外部编码</th><th>收货门店</th><th>收件人姓名</th><th>收件人电话</th><th>SKU物品编码</th><th>SKU物品名称</th><th>SKU发货数量</th><th>SKU规格型号</th><th>备注</th></tr></thead>
+    <div className="table-wrap history-wrap" style={{ maxHeight: 420 }}>
+      <table className="history-table">
+        <thead><tr><th>外部编码</th><th>收货门店</th><th>收件人姓名</th><th>收件人电话</th><th>收件人地址</th><th>SKU数</th><th>总数量</th><th>操作</th></tr></thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td>{row.externalCode}</td><td>{row.storeName}</td><td>{row.receiverName}</td><td>{row.receiverPhone}</td><td>{row.skuCode}</td><td>{row.skuName}</td><td>{row.quantity}</td><td>{row.skuSpec}</td><td>{row.remark}</td>
-            </tr>
-          ))}
+          {orders.map((order) => {
+            const isOpen = expanded[order.externalCode] ?? true;
+            return (
+              <Fragment key={order.externalCode}>
+                <tr key={order.externalCode} className="history-order-row">
+                  <td>{order.externalCode}</td>
+                  <td>{order.first.storeName}</td>
+                  <td>{order.first.receiverName}</td>
+                  <td>{order.first.receiverPhone}</td>
+                  <td>{order.first.receiverAddress}</td>
+                  <td>{order.rows.length}</td>
+                  <td>{order.totalQuantity}</td>
+                  <td><button className="link-btn" onClick={() => setExpanded((current) => ({ ...current, [order.externalCode]: !isOpen }))}>{isOpen ? "收起明细" : "展开明细"}</button></td>
+                </tr>
+                {isOpen && (
+                  <tr key={`${order.externalCode}-items`} className="history-detail-row">
+                    <td colSpan={8}>
+                      <table className="history-detail-table">
+                        <thead><tr><th>SKU物品编码</th><th>SKU物品名称</th><th>SKU发货数量</th><th>SKU规格型号</th><th>备注</th></tr></thead>
+                        <tbody>
+                          {order.rows.map((row) => (
+                            <tr key={row.id}>
+                              <td>{row.skuCode}</td><td>{row.skuName}</td><td>{row.quantity}</td><td>{row.skuSpec}</td><td>{row.remark}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
