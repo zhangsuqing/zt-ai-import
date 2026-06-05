@@ -217,10 +217,12 @@ const parseCardSheets = (file: ExtractedFile, rule: ParseRule): OrderRow[] => {
       const qtyCol = col(cardRule.itemHeaderLabels.quantity);
 
       cardRows.slice(headerOffset + 1).forEach((row, offset) => {
+        const rowText = normalize(row.join(" "));
+        if (!rowText || /合计|总计|小计/.test(rowText)) return;
         const skuCode = normalize(row[codeCol]);
         const skuName = normalize(row[nameCol]);
         const quantity = asNumber(row[qtyCol]);
-        if (!skuCode && !skuName && !quantity) return;
+        if (!skuCode || !skuName || !quantity) return;
         output.push(applyStaticValues({
           id: makeId(),
           externalCode,
