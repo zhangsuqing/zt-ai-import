@@ -161,6 +161,35 @@ export default function Page() {
     setRuleDraft(JSON.stringify(rule, null, 2));
   }
 
+  async function deleteRule(rule: ParseRule) {
+    await fetch(`/api/rules?id=${encodeURIComponent(rule.id)}`, { method: "DELETE" });
+    if (activeRule?.id === rule.id) {
+      setActiveRule(null);
+      setRuleDraft("");
+    }
+    await refreshRules();
+    toast.success("规则已删除");
+  }
+
+  async function copyRule(rule: ParseRule) {
+    const copied: ParseRule = {
+      ...rule,
+      id: crypto.randomUUID(),
+      name: `${rule.name} 副本`,
+      updatedAt: new Date().toISOString()
+    };
+    const res = await fetch("/api/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(copied)
+    });
+    const data = await res.json();
+    setActiveRule(data.rule);
+    setRuleDraft(JSON.stringify(data.rule, null, 2));
+    await refreshRules();
+    toast.success("规则已复制");
+  }
+
   function executeParse() {
     if (!file) return toast.error("请先上传文件");
     try {
@@ -275,7 +304,13 @@ export default function Page() {
               {rules.length === 0 && <div className="empty">暂无已保存规则</div>}
               {rules.map((rule) => (
                 <div className={`rule-card ${activeRule?.id === rule.id ? "active" : ""}`} key={rule.id} onClick={() => useRule(rule)}>
-                  <strong>{rule.name}</strong>
+                  <div className="rule-card-head">
+                    <strong>{rule.name}</strong>
+                    <span className="rule-actions">
+                      <button className="link-btn" onClick={(event) => { event.stopPropagation(); void copyRule(rule); }}>复制</button>
+                      <button className="link-btn danger-text" onClick={(event) => { event.stopPropagation(); void deleteRule(rule); }}>删除</button>
+                    </span>
+                  </div>
                   <div className="muted">{rule.description}</div>
                   <div className="muted">类型：{rule.sourceKind} · Sheet：{rule.sheetMode} · 映射：{rule.mappings.length}</div>
                 </div>

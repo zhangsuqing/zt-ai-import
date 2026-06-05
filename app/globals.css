@@ -406,6 +406,32 @@ button {
   background: #f4ffff;
 }
 
+.rule-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.rule-actions {
+  display: inline-flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.link-btn {
+  border: 0;
+  color: var(--brand);
+  background: transparent;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.danger-text {
+  color: var(--danger);
+}
+
 .table-wrap {
   overflow: auto;
   max-height: 56vh;

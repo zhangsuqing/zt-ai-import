@@ -16,3 +16,11 @@ export async function POST(request: NextRequest) {
   });
   return NextResponse.json({ rule: saved, database: store.isDatabaseEnabled() });
 }
+
+export async function DELETE(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const id = searchParams.get("id");
+  if (!id) return NextResponse.json({ error: "缺少规则 ID" }, { status: 400 });
+  await store.deleteRule(id);
+  return NextResponse.json({ ok: true, database: store.isDatabaseEnabled() });
+}
