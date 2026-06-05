@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
-  Bell,
   CheckCircle2,
   ChevronDown,
   ClipboardList,
@@ -16,7 +15,6 @@ import {
   Save,
   Search,
   Send,
-  Settings,
   Trash2,
   UploadCloud
 } from "lucide-react";
@@ -240,17 +238,8 @@ export default function Page() {
       </aside>
 
       <main className="main">
-        <header className="topbar">
-          <div className="top-nav"><span>财务中台</span><span>冷链智运</span><span>智冷仓链</span><span>更多租户...</span></div>
-          <div className="top-actions">
-            <button onClick={() => quickAction("返回旧版")}>返回旧版</button>
-            <button onClick={() => quickAction("快件跟踪")}>快件跟踪</button>
-            <button onClick={() => quickAction("待办")}>待办<span className="badge">21</span></button>
-            <button onClick={() => quickAction("消息")}><Bell size={15} /> 消息<span className="badge">99+</span></button>
-            <button onClick={exportExcel}>导出</button>
-            <button onClick={() => quickAction("下载")}>下载</button>
-            <span>张素青</span><button onClick={() => quickAction("设置")}><Settings size={15} /></button>
-          </div>
+        <header className="topbar" aria-label="顶部导航背景">
+          <div className="top-nav" />
         </header>
         <div className="tabs">
           <button onClick={() => setActiveTab("import")}>《</button>
