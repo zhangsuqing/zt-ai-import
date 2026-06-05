@@ -65,6 +65,8 @@ export default function Page() {
   const [progress, setProgress] = useState(0);
   const [busy, setBusy] = useState("");
   const [activeTab, setActiveTab] = useState<"import" | "history">("import");
+  const [rawInfo, setRawInfo] = useState("");
+  const [historyPage, setHistoryPage] = useState(1);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -106,6 +108,7 @@ export default function Page() {
       setProgress(12);
       const extracted = await extractFile(selected);
       setFile(extracted);
+      setRawInfo("");
       setProgress(40);
       toast.success("文件读取完成");
       await generateRule(extracted);
@@ -198,10 +201,16 @@ export default function Page() {
       setProgress(20);
       const start = performance.now();
       const parsed = parseWithRule(file, rule);
+      if (!parsed.length) {
+        setRawInfo(file.text.slice(0, 3000) || file.sheets.map((sheet) => `${sheet.name}: ${sheet.rows.length} 行`).join("\n"));
+        toast.error("未解析出有效数据，请检查规则配置");
+        return;
+      }
       setRows(parsed);
       setProgress(100);
       toast.success(`解析完成 ${parsed.length} 行，用时 ${Math.round(performance.now() - start)}ms`);
     } catch {
+      if (file) setRawInfo(file.text.slice(0, 3000) || file.sheets.map((sheet) => `${sheet.name}: ${sheet.rows.length} 行`).join("\n"));
       toast.error("规则 JSON 格式不正确，无法解析");
     } finally {
       setBusy("");
@@ -211,6 +220,10 @@ export default function Page() {
 
   function updateCell(rowId: string, field: CanonicalField, value: string) {
     setRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: field === "quantity" ? value : value } : row)));
+  }
+
+  function deleteRow(rowId: string) {
+    setRows((current) => current.filter((row) => row.id !== rowId));
   }
 
   function exportExcel() {
@@ -237,8 +250,13 @@ export default function Page() {
     toast.success(`提交成功 ${data.success} 条，失败 ${data.failed} 条`);
     setRows([]);
     await refreshHistory();
+    setHistoryPage(1);
     setTimeout(() => setProgress(0), 800);
   }
+
+  const pageSize = 10;
+  const totalHistoryPages = Math.max(1, Math.ceil(history.length / pageSize));
+  const pagedHistory = history.slice((historyPage - 1) * pageSize, historyPage * pageSize);
 
   return (
     <div className="app-shell">
@@ -331,10 +349,16 @@ export default function Page() {
                 <span className="muted">共 {rows.length} 条</span>
               </div>
             </div>
-            <EditableTable rows={rows} errors={errorMap} onChange={updateCell} />
+            <EditableTable rows={rows} errors={errorMap} onChange={updateCell} onDelete={deleteRow} />
             {errors.length > 0 && (
               <div className="error-list">
                 {errors.map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 · {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}
+              </div>
+            )}
+            {rawInfo && (
+              <div className="raw-info">
+                <strong>原始文件信息</strong>
+                <pre>{rawInfo}</pre>
               </div>
             )}
           </div>}
@@ -344,10 +368,16 @@ export default function Page() {
               <div className="toolbar-group"><FileSpreadsheet size={16} /><strong>已导入运单列表</strong><span className="muted">从服务端读取，支持筛选分页展示</span></div>
               <div className="toolbar-group">
                 <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="外部编码/姓名/门店" />
-                <button className="btn primary" onClick={() => void refreshHistory(keyword)}>查询</button>
+                <button className="btn primary" onClick={() => { setHistoryPage(1); void refreshHistory(keyword); }}>查询</button>
               </div>
             </div>
-            <HistoryTable rows={history.slice(0, 30)} />
+            <HistoryTable rows={pagedHistory} />
+            <div className="pager">
+              <span>共 {history.length} 条</span>
+              <button className="btn" disabled={historyPage <= 1} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}>上一页</button>
+              <span>{historyPage} / {totalHistoryPages}</span>
+              <button className="btn" disabled={historyPage >= totalHistoryPages} onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}>下一页</button>
+            </div>
           </div>
         </section>
       </main>
@@ -355,13 +385,13 @@ export default function Page() {
   );
 }
 
-function EditableTable({ rows, errors, onChange }: { rows: OrderRow[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void }) {
+function EditableTable({ rows, errors, onChange, onDelete }: { rows: OrderRow[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void }) {
   if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>序号</th><th>状态</th>{editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}<th>来源</th></tr>
+          <tr><th>序号</th><th>状态</th>{editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}<th>来源</th><th>操作</th></tr>
         </thead>
         <tbody>
           {rows.map((row, index) => {
@@ -376,6 +406,7 @@ function EditableTable({ rows, errors, onChange }: { rows: OrderRow[]; errors: M
                   </td>
                 ))}
                 <td>{row.sourceSheet ?? "-"} {row.sourceRow ?? ""}</td>
+                <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
               </tr>
             );
           })}
