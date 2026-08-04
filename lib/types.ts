@@ -32,26 +32,11 @@ export type ParseRule = {
   dataEndHint?: string;
   groupBy: CanonicalField;
   mappings: FieldMapping[];
-  metadata?: {
-    labels?: Partial<Record<CanonicalField, string[]>>;
-    titleStorePattern?: string;
-    titleExternalCodePattern?: string;
-    sheetNameAsExternalCode?: boolean;
-    preferTitleStore?: boolean;
-  };
   matrix?: {
     fixedFields: string[];
-    groupByFields?: string[];
-    preserveFields?: string[];
-    externalCodeStrategy?: "randomPerGroup";
     valueColumnsStartAt?: number;
     columnHeaderAs: "storeName" | "date";
     valuePattern?: string;
-  };
-  card?: {
-    startMarkers: string[];
-    infoLabels: Partial<Record<CanonicalField, string>>;
-    itemHeaderLabels: Partial<Record<CanonicalField, string>>;
   };
   textBlock?: {
     blockSeparator?: string;
@@ -92,7 +77,6 @@ export type OrderRow = {
   remark: string;
   sourceSheet?: string;
   sourceRow?: number;
-  sourceValues?: Record<string, string | number>;
 };
 
 export type ValidationError = {

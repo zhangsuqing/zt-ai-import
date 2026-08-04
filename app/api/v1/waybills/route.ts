@@ -1,17 +1,8 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { store } from "@/lib/storage";
 import { OrderRow } from "@/lib/types";
 
 export const runtime = "nodejs";
-
-type WaybillItem = {
-  skuCode: string;
-  skuName: string;
-  quantity: number;
-  skuSpec: string;
-  temperature: string;
-  remark: string;
-};
 
 type WaybillDto = {
   waybillNo: string;
@@ -22,7 +13,7 @@ type WaybillDto = {
   receiverAddress: string;
   amount: number;
   source: "v2";
-  items: WaybillItem[];
+  items: Array<{ skuCode: string; skuName: string; quantity: number; skuSpec: string; remark: string }>;
   rows: OrderRow[];
 };
 
@@ -39,7 +30,6 @@ function groupRows(rows: OrderRow[]) {
     list.push(row);
     groups.set(row.externalCode, list);
   }
-
   return Array.from(groups.entries()).map(([externalCode, list]): WaybillDto => {
     const first = list[0];
     return {
@@ -56,7 +46,6 @@ function groupRows(rows: OrderRow[]) {
         skuName: row.skuName,
         quantity: toNumber(row.quantity),
         skuSpec: row.skuSpec,
-        temperature: row.temperature,
         remark: row.remark
       })),
       rows: list
@@ -70,7 +59,6 @@ export async function GET(request: NextRequest) {
   const keyword = searchParams.get("keyword")?.trim() ?? waybillNo;
   const rows = await store.listOrders(keyword);
   const waybills = groupRows(rows).filter((item) => !waybillNo || item.externalCode === waybillNo);
-
   return NextResponse.json({
     success: true,
     apiVersion: "v1",

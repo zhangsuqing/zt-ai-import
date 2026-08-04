@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   const rows = (await request.json()) as OrderRow[];
-  const saved = await store.saveOrders(rows);
+  const saved = await store.saveOrdersBulk(rows);
   return NextResponse.json({
     success: saved.length,
     failed: 0,
@@ -25,8 +25,5 @@ export async function POST(request: NextRequest) {
 
 export async function DELETE() {
   await store.clearOrders();
-  return NextResponse.json({
-    success: true,
-    database: store.isDatabaseEnabled()
-  });
+  return NextResponse.json({ success: true, database: store.isDatabaseEnabled() });
 }

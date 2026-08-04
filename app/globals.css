@@ -122,13 +122,10 @@ button {
 .nav-item {
   color: #cde0e8;
   font-size: 14px;
-}
-
-.nav-button {
   width: 100%;
   border: 0;
-  text-align: left;
   background: transparent;
+  text-align: left;
 }
 
 .nav-item.active {
@@ -136,6 +133,11 @@ button {
   background: linear-gradient(90deg, rgba(15, 198, 194, .38), rgba(15, 198, 194, .08));
   border-left: 3px solid var(--brand);
   padding-left: 15px;
+}
+
+.nav-item:hover {
+  color: #fff;
+  background: rgba(15, 198, 194, .18);
 }
 
 .main {
@@ -165,17 +167,6 @@ button {
   font-size: 14px;
 }
 
-.top-actions button,
-.tabs button {
-  border: 0;
-  color: inherit;
-  background: transparent;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0;
-}
-
 .badge {
   display: inline-flex;
   min-width: 18px;
@@ -202,10 +193,6 @@ button {
 .tab {
   color: var(--brand);
   font-weight: 700;
-}
-
-.tab.active {
-  border-bottom: 2px solid var(--brand);
 }
 
 .content {
@@ -331,6 +318,16 @@ button {
   opacity: .55;
 }
 
+.spin {
+  animation: spin .8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -338,6 +335,13 @@ button {
   gap: 12px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--line);
+}
+
+.rule-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  border-bottom: 0;
+  padding-bottom: 10px;
 }
 
 .toolbar-group {
@@ -384,7 +388,7 @@ button {
 
 .grid-2 {
   display: grid;
-  grid-template-columns: minmax(320px, 440px) 1fr;
+  grid-template-columns: minmax(420px, .9fr) minmax(420px, 1.1fr);
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -406,119 +410,9 @@ button {
   background: #f4ffff;
 }
 
-.rule-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.rule-actions {
-  display: inline-flex;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.link-btn {
-  border: 0;
-  color: var(--brand);
-  background: transparent;
-  padding: 0;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.danger-text {
-  color: var(--danger);
-}
-
 .table-wrap {
   overflow: auto;
   max-height: 56vh;
-}
-
-.card-preview {
-  display: grid;
-  gap: 12px;
-  padding: 12px;
-  max-height: 56vh;
-  overflow: auto;
-}
-
-.order-card {
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.order-card-head {
-  min-height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--line);
-  background: #f7fbfc;
-}
-
-.card-info-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
-  gap: 10px;
-  padding: 12px;
-}
-
-.card-info-grid label {
-  display: grid;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.card-info-grid input {
-  height: 32px;
-  border: 1px solid #d8e2ea;
-  border-radius: 4px;
-  padding: 0 8px;
-  outline: 0;
-  color: var(--text);
-}
-
-.card-items {
-  max-height: none;
-  border-top: 1px solid var(--line);
-}
-
-.card-items table {
-  min-width: 760px;
-}
-
-.history-wrap table {
-  min-width: 1180px;
-}
-
-.history-order-row td {
-  font-weight: 600;
-  background: #fbfdfe;
-}
-
-.history-detail-row td {
-  height: auto;
-  padding: 0;
-  background: #f6f8fa;
-}
-
-.history-detail-table {
-  min-width: 760px;
-  font-size: 12px;
-}
-
-.history-detail-table th,
-.history-detail-table td {
-  height: 34px;
-  background: #fff;
 }
 
 table {
@@ -557,14 +451,28 @@ td input {
   background: transparent;
 }
 
-.readonly-cell {
-  display: inline-block;
-  min-width: 110px;
-  color: #4f5b66;
+.select-col {
+  width: 44px;
+  min-width: 44px;
+  text-align: center;
+}
+
+.select-col input {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
 }
 
 tr.error-row td {
   background: #fff8f7;
+}
+
+tr.active-row td {
+  background: #eefdfd;
+  box-shadow: inset 0 1px 0 rgba(15, 198, 194, .22), inset 0 -1px 0 rgba(15, 198, 194, .22);
 }
 
 td.error-cell {
@@ -591,6 +499,66 @@ td.error-cell {
   background: #fff1f0;
 }
 
+.link-btn {
+  border: 1px solid #cfdbe4;
+  border-radius: 4px;
+  padding: 3px 10px;
+  color: #075b61;
+  background: #fff;
+}
+
+.link-btn:hover {
+  border-color: var(--brand);
+  color: #fff;
+  background: var(--brand);
+}
+
+.danger-text {
+  color: #d93026;
+}
+
+.notice {
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 10px 12px;
+  border: 1px solid #d7e5ec;
+  background: #f8fcfd;
+}
+
+.notice.danger {
+  border-color: #f0b8b1;
+  color: #9c332b;
+  background: #fff5f3;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mini-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+.mini-card strong {
+  font-size: 24px;
+  color: var(--primary);
+}
+
+.mini-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .error-list {
   max-height: 170px;
   overflow: auto;
@@ -598,24 +566,6 @@ td.error-cell {
   border-top: 1px solid var(--line);
   color: #d93026;
   background: #fffafa;
-}
-
-.raw-info {
-  border-top: 1px solid var(--line);
-  padding: 12px 14px;
-  background: #fbfdfe;
-}
-
-.raw-info pre {
-  max-height: 180px;
-  overflow: auto;
-  margin: 8px 0 0;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  color: #53606c;
-  background: #fff;
-  white-space: pre-wrap;
 }
 
 .empty {
@@ -627,17 +577,6 @@ td.error-cell {
 
 .history {
   margin-top: 12px;
-}
-
-.pager {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 13px;
 }
 
 @media (max-width: 980px) {
@@ -663,4 +602,22 @@ td.error-cell {
     gap: 12px;
     flex-wrap: wrap;
   }
+}
+
+.history-table .summary-row {
+  background: #f0fdfa;
+  font-weight: 700;
+}
+
+.history-table .detail-row td:first-child {
+  color: #64748b;
+  padding-left: 18px;
+}
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 12px;
 }

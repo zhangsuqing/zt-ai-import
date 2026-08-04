@@ -1,15 +1,16 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
+  AlertTriangle,
   ArrowDownToLine,
   CheckCircle2,
-  ChevronDown,
   ClipboardList,
+  Database,
   FileInput,
   FileSpreadsheet,
   Loader2,
-  Menu,
   Plus,
   RefreshCw,
   Save,
@@ -21,8 +22,8 @@ import {
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import { extractFile } from "@/lib/client-file";
-import { parseWithRule, validateRows } from "@/lib/rule-engine";
-import { CanonicalField, ExtractedFile, fieldLabels, OrderRow, ParseRule, ValidationError, emptyOrderRow } from "@/lib/types";
+import { normalizeParseRule, parseWithRule, validateRows } from "@/lib/rule-engine";
+import { CanonicalField, ExtractedFile, OrderRow, ParseRule, ValidationError, emptyOrderRow, fieldLabels } from "@/lib/types";
 
 const editableFields: CanonicalField[] = [
   "externalCode",
@@ -34,72 +35,53 @@ const editableFields: CanonicalField[] = [
   "skuName",
   "quantity",
   "skuSpec",
+  "temperature",
   "remark"
 ];
 
-const previewFieldOrder: CanonicalField[] = editableFields;
-const cardReceiverFields: CanonicalField[] = ["storeName", "receiverName", "receiverPhone", "receiverAddress"];
-const cardItemFields: CanonicalField[] = ["skuCode", "skuName", "quantity", "skuSpec", "remark"];
-
-type PreviewColumn =
-  | { kind: "field"; field: CanonicalField; label: string }
-  | { kind: "source"; key: string; label: string };
-
-type HistoryOrder = {
-  externalCode: string;
-  rows: OrderRow[];
-  first: OrderRow;
-  totalQuantity: number;
+type ImportTaskView = {
+  task_id: string;
+  trace_id: string;
+  status: string;
+  total_rows: number;
+  processed_rows: number;
+  success_rows: number;
+  failed_rows: number;
+  total_batches: number;
+  completed_batches: number;
+  degraded: boolean;
+  warning?: string;
+  progress: number;
+  recent_errors?: Array<{
+    rowNumber: number;
+    fieldName: string;
+    rawValue: string;
+    errorCode: string;
+    errorReason: string;
+    batchIndex: number;
+  }>;
+  batches?: Array<{
+    unitId: string;
+    batchIndex: number;
+    startRow: number;
+    endRow: number;
+    status: string;
+    retryCount: number;
+  }>;
 };
 
-const columnKey = (column: PreviewColumn) => column.kind === "field" ? `field-${column.field}` : `source-${column.key}`;
-
-const readColumnValue = (row: OrderRow, column: PreviewColumn) =>
-  column.kind === "field" ? row[column.field] : row.sourceValues?.[column.key] ?? "";
-
-function groupHistoryRows(rows: OrderRow[]): HistoryOrder[] {
-  const groups = new Map<string, OrderRow[]>();
-  rows.forEach((row) => {
-    const key = row.externalCode || `未编码-${row.id}`;
-    const list = groups.get(key) ?? [];
-    list.push(row);
-    groups.set(key, list);
-  });
-  return Array.from(groups.entries()).map(([externalCode, groupRows]) => ({
-    externalCode,
-    rows: groupRows,
-    first: groupRows[0],
-    totalQuantity: groupRows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0)
-  }));
-}
-
-function makePreviewColumns(rule: ParseRule | null, rows: OrderRow[]): PreviewColumn[] {
-  const mappedFields = rule?.mappings?.map((mapping) => mapping.target) ?? [];
-  const valuedFields = previewFieldOrder.filter((field) => rows.some((row) => String(row[field] ?? "").trim()));
-  const structuralFields = rule?.sourceKind === "matrix" ? ["externalCode", "storeName", "skuCode", "skuName", "quantity", "skuSpec", "remark"] as CanonicalField[] : [];
-  const selected = [...mappedFields, ...structuralFields, ...valuedFields].filter((field, index, list) => list.indexOf(field) === index);
-  const sourceKeys = rule?.sourceKind === "matrix"
-    ? [
-        ...(rule.matrix?.preserveFields ?? []),
-        ...rows.flatMap((row) => Object.keys(row.sourceValues ?? {}))
-      ].filter((key, index, list) => key && list.indexOf(key) === index)
-    : [];
-  const sourceColumns: PreviewColumn[] = sourceKeys.map((key) => ({ kind: "source", key, label: key }));
-  const fieldColumns: PreviewColumn[] = previewFieldOrder
-    .filter((field) => selected.includes(field))
-    .map((field) => {
-      const mappingLabel = rule?.mappings?.find((mapping) => mapping.target === field)?.source;
-      const matrixLabel = rule?.sourceKind === "matrix"
-        ? ({ externalCode: "外部编码", storeName: "收货门店", skuCode: mappingLabel || "SKU条码", skuName: mappingLabel || "SKU名称", quantity: "下单数量", skuSpec: mappingLabel || "规格", remark: "门店列" } as Partial<Record<CanonicalField, string>>)[field]
-        : undefined;
-      return { kind: "field", field, label: matrixLabel || mappingLabel || fieldLabels[field] };
-    });
-  return [...sourceColumns, ...fieldColumns];
-}
+type MonitorSummary = {
+  pendingEvents?: number;
+  queueAlert?: string;
+  throughputRowsPerMinute?: number;
+  taskStatus?: Array<{ status: string; count: number }>;
+  errorCounts?: Array<{ error_code: string; count: number }>;
+  stageStats?: Record<string, { p50: number; p95: number; p99: number }>;
+};
 
 const makeManualRule = (): ParseRule => ({
   id: crypto.randomUUID(),
-  name: "新建空白规则",
+  name: "新建表格规则",
   description: "手动配置字段映射后保存。",
   sourceKind: "table",
   sheetMode: "all",
@@ -112,39 +94,70 @@ const makeManualRule = (): ParseRule => ({
   updatedAt: new Date().toISOString()
 });
 
+function groupOrders(rows: OrderRow[]) {
+  const groups = new Map<string, OrderRow[]>();
+  for (const row of rows) {
+    const key = row.externalCode || row.id;
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  return Array.from(groups.entries()).map(([externalCode, items]) => ({
+    externalCode,
+    first: items[0],
+    items,
+    totalQuantity: items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0)
+  }));
+}
+
 export default function Page() {
+  const [activeSection, setActiveSection] = useState<"import" | "tasks" | "monitor">("import");
   const [file, setFile] = useState<ExtractedFile | null>(null);
   const [rules, setRules] = useState<ParseRule[]>([]);
   const [activeRule, setActiveRule] = useState<ParseRule | null>(null);
   const [ruleDraft, setRuleDraft] = useState("");
   const [rows, setRows] = useState<OrderRow[]>([]);
+  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<ValidationError[]>([]);
   const [history, setHistory] = useState<OrderRow[]>([]);
   const [keyword, setKeyword] = useState("");
-  const [progress, setProgress] = useState(0);
-  const [busy, setBusy] = useState("");
-  const [activeTab, setActiveTab] = useState<"import" | "history">("import");
-  const [rawInfo, setRawInfo] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
-  const [previewPage, setPreviewPage] = useState(1);
+  const [expandedHistoryCodes, setExpandedHistoryCodes] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [currentTask, setCurrentTask] = useState<ImportTaskView | null>(null);
+  const [taskList, setTaskList] = useState<Array<{ id: string; traceId: string; status: string; totalRows: number; processedRows: number; failedRows: number }>>([]);
+  const [monitor, setMonitor] = useState<MonitorSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     void refreshRules();
     void refreshHistory();
+    void refreshImportTasks();
+    void refreshMonitor();
   }, []);
 
   useEffect(() => {
     setErrors(validateRows(rows, history.map((row) => row.externalCode)));
   }, [rows, history]);
 
+  useEffect(() => {
+    if (!currentTask || currentTask.status === "CREATING" || ["COMPLETED", "PARTIAL_SUCCESS", "FAILED"].includes(currentTask.status)) return;
+    const timer = window.setInterval(() => {
+      void pumpImportQueue();
+      void refreshTask(currentTask.task_id);
+      void refreshMonitor();
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [currentTask]);
+
   const errorMap = useMemo(() => {
     const map = new Map<string, Set<string>>();
-    errors.forEach((error) => {
+    for (const error of errors) {
       const set = map.get(error.rowId) ?? new Set<string>();
       set.add(error.field);
       map.set(error.rowId, set);
-    });
+    }
     return map;
   }, [errors]);
 
@@ -158,52 +171,138 @@ export default function Page() {
     const res = await fetch(`/api/orders?keyword=${encodeURIComponent(search)}`);
     const data = await res.json();
     setHistory(data.rows ?? []);
+    setHistoryPage(1);
+  }
+
+  async function refreshImportTasks() {
+    const res = await fetch("/api/import-tasks");
+    const data = await res.json();
+    const nextTasks = (data.tasks ?? []).map((task: any) => ({
+      id: task.id,
+      traceId: task.traceId,
+      status: task.status,
+      totalRows: task.totalRows,
+      processedRows: task.processedRows,
+      failedRows: task.failedRows
+    }));
+    setTaskList(nextTasks);
+    return nextTasks.length;
+  }
+
+  async function refreshMonitor() {
+    const res = await fetch("/api/import-monitor/summary");
+    if (res.ok) setMonitor(await res.json());
+  }
+
+  async function pumpImportQueue() {
+    const res = await fetch("/api/import-worker/dispatch?limit=4", { method: "POST" });
+    if (!res.ok) throw new Error("推进队列失败");
+    return await res.json() as { recovered?: number; claimed?: number; results?: unknown[] };
+  }
+
+  async function refreshTask(taskId: string) {
+    const res = await fetch(`/api/import-tasks/${encodeURIComponent(taskId)}`);
+    if (!res.ok) return;
+    const data = await res.json() as ImportTaskView;
+    setCurrentTask(data);
+    if (["COMPLETED", "PARTIAL_SUCCESS", "FAILED"].includes(data.status)) {
+      await refreshHistory(keyword);
+      await refreshImportTasks();
+    }
+  }
+
+  async function handlePumpQueue() {
+    try {
+      const result = await pumpImportQueue();
+      if (currentTask) await refreshTask(currentTask.task_id);
+      await refreshImportTasks();
+      await refreshMonitor();
+      const claimed = result.claimed ?? 0;
+      const recovered = result.recovered ?? 0;
+      toast.success(claimed || recovered ? `队列已推进：处理 ${claimed} 个事件，恢复 ${recovered} 个批次` : "队列已检查：暂无待处理事件");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "推进队列失败");
+    }
+  }
+
+  async function handleRefreshTasks() {
+    try {
+      const count = await refreshImportTasks();
+      if (currentTask) await refreshTask(currentTask.task_id);
+      await refreshMonitor();
+      toast.success(`任务已刷新：${count} 条`);
+    } catch {
+      toast.error("刷新任务失败");
+    }
+  }
+
+  async function handleOpenTask(taskId: string) {
+    try {
+      await refreshTask(taskId);
+      await refreshMonitor();
+      toast.success(`已打开任务：${taskId}`);
+    } catch {
+      toast.error("打开任务失败");
+    }
   }
 
   async function handleFiles(files: FileList | null) {
     const selected = files?.[0];
     if (!selected) return;
     try {
-      setBusy("正在读取文件");
-      setProgress(12);
+      setBusy("读取文件");
+      setProgress(15);
       const extracted = await extractFile(selected);
       setFile(extracted);
-      setRawInfo("");
-      setProgress(40);
-      toast.success("文件读取完成");
-      await generateRule(extracted);
+      setRows([]);
+      setSelectedRowIds(new Set());
+      setProgress(45);
+      if (activeRule) {
+        const normalized = normalizeParseRule(activeRule, extracted);
+        setActiveRule(normalized);
+        setRuleDraft(JSON.stringify(normalized, null, 2));
+        toast.success("文件读取完成，已沿用当前规则");
+      } else {
+        await generateRule(extracted);
+        toast.success("文件读取完成");
+      }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "文件解析失败");
+      toast.error(error instanceof Error ? error.message : "文件读取失败");
     } finally {
       setBusy("");
-      setProgress(100);
-      setTimeout(() => setProgress(0), 800);
+      setProgress(0);
     }
   }
 
+
   async function generateRule(targetFile = file) {
-    if (!targetFile) {
-      toast.error("请先上传文件");
-      return;
+    if (!targetFile) return toast.error("请先上传文件");
+    try {
+      setBusy("AI 生成规则");
+      const res = await fetch("/api/ai-rule", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: targetFile })
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : null;
+      if (!res.ok || !data?.rule) {
+        throw new Error(data?.error ?? `AI 生成规则失败：HTTP ${res.status}`);
+      }
+      setActiveRule(data.rule);
+      setRuleDraft(JSON.stringify(data.rule, null, 2));
+      toast.success(data.note ?? "规则已生成");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "AI 生成规则失败");
+    } finally {
+      setBusy("");
     }
-    setBusy("AI 正在生成规则");
-    setProgress(55);
-    const res = await fetch("/api/ai-rule", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(targetFile)
-    });
-    const data = await res.json();
-    setActiveRule(data.rule);
-    setRuleDraft(JSON.stringify(data.rule, null, 2));
-    setProgress(80);
-    toast.success(data.note ?? `规则已生成：${data.usedModel}`);
-    setBusy("");
   }
+
 
   async function saveRule() {
     try {
-      const parsed = JSON.parse(ruleDraft) as ParseRule;
+      const parsed = normalizeParseRule(JSON.parse(ruleDraft) as Partial<ParseRule>, file ?? undefined);
       const res = await fetch("/api/rules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -220,8 +319,9 @@ export default function Page() {
   }
 
   function useRule(rule: ParseRule) {
-    setActiveRule(rule);
-    setRuleDraft(JSON.stringify(rule, null, 2));
+    const normalized = normalizeParseRule(rule, file ?? undefined);
+    setActiveRule(normalized);
+    setRuleDraft(JSON.stringify(normalized, null, 2));
   }
 
   async function deleteRule(rule: ParseRule) {
@@ -234,67 +334,57 @@ export default function Page() {
     toast.success("规则已删除");
   }
 
-  async function copyRule(rule: ParseRule) {
-    const copied: ParseRule = {
-      ...rule,
-      id: crypto.randomUUID(),
-      name: `${rule.name} 副本`,
-      updatedAt: new Date().toISOString()
-    };
-    const res = await fetch("/api/rules", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(copied)
-    });
-    const data = await res.json();
-    setActiveRule(data.rule);
-    setRuleDraft(JSON.stringify(data.rule, null, 2));
-    await refreshRules();
-    toast.success("规则已复制");
-  }
-
   function executeParse() {
     if (!file) return toast.error("请先上传文件");
+    let rule: ParseRule;
     try {
-      const rule = JSON.parse(ruleDraft) as ParseRule;
-      setBusy("正在执行解析");
-      setProgress(20);
-      const start = performance.now();
-      const parsed = parseWithRule(file, rule);
-      if (!parsed.length) {
-        setRawInfo(file.text.slice(0, 3000) || file.sheets.map((sheet) => `${sheet.name}: ${sheet.rows.length} 行`).join("\n"));
-        toast.error("未解析出有效数据，请检查规则配置");
-        return;
-      }
-      setRows(parsed);
-      setPreviewPage(1);
-      setProgress(100);
-      toast.success(`解析完成 ${parsed.length} 行，用时 ${Math.round(performance.now() - start)}ms`);
+      rule = normalizeParseRule(JSON.parse(ruleDraft) as Partial<ParseRule>, file);
     } catch {
-      if (file) setRawInfo(file.text.slice(0, 3000) || file.sheets.map((sheet) => `${sheet.name}: ${sheet.rows.length} 行`).join("\n"));
       toast.error("规则 JSON 格式不正确，无法解析");
-    } finally {
-      setBusy("");
-      setTimeout(() => setProgress(0), 800);
+      return;
+    }
+    try {
+      setRuleDraft(JSON.stringify(rule, null, 2));
+      const parsed = parseWithRule(file, rule);
+      setRows(parsed);
+      setSelectedRowIds(new Set());
+      toast.success(`试解析完成 ${parsed.length} 行`);
+    } catch (error) {
+      toast.error(error instanceof Error ? `规则执行失败：${error.message}` : "规则执行失败");
     }
   }
 
   function updateCell(rowId: string, field: CanonicalField, value: string) {
-    setRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: field === "quantity" ? value : value } : row)));
+    setRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)));
   }
 
-  function updateGroupCells(rowIds: string[], field: CanonicalField, value: string) {
-    const ids = new Set(rowIds);
-    setRows((current) => current.map((row) => (ids.has(row.id) ? { ...row, [field]: value } : row)));
+  function toggleRowSelection(rowId: string, checked: boolean) {
+    setSelectedRowIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(rowId);
+      else next.delete(rowId);
+      return next;
+    });
   }
 
-  function deleteRow(rowId: string) {
-    setRows((current) => current.filter((row) => row.id !== rowId));
+  function toggleVisibleRowsSelection(visibleRows: OrderRow[], checked: boolean) {
+    setSelectedRowIds((current) => {
+      const next = new Set(current);
+      for (const row of visibleRows) {
+        if (checked) next.add(row.id);
+        else next.delete(row.id);
+      }
+      return next;
+    });
+  }
+
+  function deleteSelectedRows() {
+    setRows((current) => current.filter((row) => !selectedRowIds.has(row.id)));
+    setSelectedRowIds(new Set());
   }
 
   function exportExcel() {
-    const columns: PreviewColumn[] = previewColumns.length ? previewColumns : editableFields.map((field) => ({ kind: "field", field, label: fieldLabels[field] }));
-    const data = rows.map((row) => Object.fromEntries(columns.map((column) => [column.label, readColumnValue(row, column)])));
+    const data = rows.map((row) => Object.fromEntries(editableFields.map((field) => [fieldLabels[field], row[field]])));
     const sheet = XLSX.utils.json_to_sheet(data);
     const book = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(book, sheet, "预览数据");
@@ -304,38 +394,82 @@ export default function Page() {
   async function submitOrders() {
     if (errors.length) return toast.error("存在校验错误，请先修正");
     if (!rows.length) return toast.error("没有可提交的数据");
-    setBusy("正在提交下单");
-    setProgress(15);
-    const res = await fetch("/api/orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(rows)
-    });
-    const data = await res.json();
-    setProgress(100);
-    setBusy("");
-    toast.success(`提交成功 ${data.success} 条，失败 ${data.failed} 条`);
-    setRows([]);
-    await refreshHistory();
-    setHistoryPage(1);
-    setTimeout(() => setProgress(0), 800);
+    if (!file) return toast.error("请先上传文件");
+    let rule: ParseRule;
+    try {
+      rule = normalizeParseRule(JSON.parse(ruleDraft) as Partial<ParseRule>, file);
+    } catch {
+      return toast.error("规则 JSON 格式不正确");
+    }
+    let loadingToast: string | number | undefined;
+    try {
+      setBusy("创建异步导入任务");
+      loadingToast = toast.loading("正在创建异步导入任务...");
+      setCurrentTask({
+        task_id: "creating",
+        trace_id: "",
+        status: "CREATING",
+        total_rows: rows.length,
+        processed_rows: 0,
+        success_rows: 0,
+        failed_rows: 0,
+        total_batches: Math.max(1, Math.ceil(rows.length / 1000)),
+        completed_batches: 0,
+        degraded: false,
+        progress: 0
+      });
+      setActiveSection("tasks");
+      const res = await fetch("/api/import-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: file.fileName, rule, rows, batchSize: 1000 })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCurrentTask(null);
+        setActiveSection("import");
+        return toast.error(data.error ?? "创建任务失败");
+      }
+      toast.success(`任务已创建：${data.task_id}`);
+      setCurrentTask({
+        task_id: data.task_id,
+        trace_id: data.trace_id,
+        status: data.status,
+        total_rows: data.total_rows,
+        processed_rows: 0,
+        success_rows: 0,
+        failed_rows: 0,
+        total_batches: data.total_batches,
+        completed_batches: 0,
+        degraded: false,
+        progress: 0
+      });
+      setActiveSection("tasks");
+      void refreshImportTasks();
+      void (async () => {
+        try {
+          await pumpImportQueue();
+          await refreshTask(data.task_id);
+          await refreshImportTasks();
+          await refreshMonitor();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "推进队列失败");
+        }
+      })();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "创建任务失败");
+    } finally {
+      if (loadingToast) toast.dismiss(loadingToast);
+      setBusy("");
+    }
   }
 
-  const pageSize = 10;
-  const historyOrders = useMemo(() => groupHistoryRows(history), [history]);
-  const totalHistoryPages = Math.max(1, Math.ceil(historyOrders.length / pageSize));
-  const pagedHistory = historyOrders.slice((historyPage - 1) * pageSize, historyPage * pageSize);
-  const previewPageSize = 100;
-  const totalPreviewPages = Math.max(1, Math.ceil(rows.length / previewPageSize));
-  const pagedRows = rows.slice((previewPage - 1) * previewPageSize, previewPage * previewPageSize);
-  const previewRule = useMemo(() => {
-    try {
-      return ruleDraft ? JSON.parse(ruleDraft) as ParseRule : activeRule;
-    } catch {
-      return activeRule;
-    }
-  }, [activeRule, ruleDraft]);
-  const previewColumns = useMemo(() => makePreviewColumns(previewRule, rows), [previewRule, rows]);
+  const historyOrders = useMemo(() => groupOrders(history), [history]);
+  const historyPageSize = 10;
+  const totalHistoryPages = Math.max(1, Math.ceil(historyOrders.length / historyPageSize));
+  const currentHistoryPage = Math.min(historyPage, totalHistoryPages);
+  const pagedHistoryOrders = historyOrders.slice((currentHistoryPage - 1) * historyPageSize, currentHistoryPage * historyPageSize);
+  const visibleRows = rows.slice(0, 200);
 
   return (
     <div className="app-shell">
@@ -344,161 +478,190 @@ export default function Page() {
           <div className="brand-mark">ZT</div>
           <div>
             <div className="brand-title">中通冷链</div>
-            <div className="brand-sub">ZTO COLD CHAIN</div>
+            <div className="brand-sub">V2 Async Import</div>
           </div>
         </div>
-        <div className="org-row"><Menu size={16} />总部<ChevronDown size={16} style={{ marginLeft: "auto" }} /></div>
-        <div className="nav-search"><Search size={15} /><input placeholder="输入菜单名称" /></div>
-        <button className={`nav-item nav-button ${activeTab === "import" ? "active" : ""}`} onClick={() => setActiveTab("import")}>
-          <UploadCloud size={16} />智能导入
-        </button>
-        <button className={`nav-item nav-button ${activeTab === "history" ? "active" : ""}`} onClick={() => setActiveTab("history")}>
-          <ClipboardList size={16} />已导入运单
-        </button>
+        <button className={`nav-item ${activeSection === "import" ? "active" : ""}`} onClick={() => setActiveSection("import")}><UploadCloud size={16} />万能导入解析</button>
+        <button className={`nav-item ${activeSection === "tasks" ? "active" : ""}`} onClick={() => setActiveSection("tasks")}><Activity size={16} />任务追踪</button>
+        <button className={`nav-item ${activeSection === "monitor" ? "active" : ""}`} onClick={() => setActiveSection("monitor")}><Database size={16} />监控告警</button>
       </aside>
 
       <main className="main">
-        <header className="topbar" aria-label="顶部导航背景">
-          <div className="top-nav" />
+        <header className="topbar">
+          <strong>V2 万能导入解析系统</strong>
+          <span>异步事件驱动 / Outbox / 批量校验 / 批量落库 / Trace 可观测</span>
         </header>
-        <div className="tabs">
-          <button onClick={() => setActiveTab("import")}>《</button>
-          <button className={`tab ${activeTab === "import" ? "active" : ""}`} onClick={() => setActiveTab("import")}>智能导入批量下单 ×</button>
-          <button className={`tab ${activeTab === "history" ? "active" : ""}`} onClick={() => setActiveTab("history")}>已导入运单</button>
-          <button style={{ marginLeft: "auto" }} onClick={() => { void refreshRules(); void refreshHistory(keyword); toast.success("已刷新"); }}><RefreshCw size={16} /></button>
-        </div>
 
         <section className="content">
-          {activeTab === "import" && <div className="grid-2">
+          {activeSection === "import" && <div className="grid-2">
             <div className="panel rule-editor">
               <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(event.dataTransfer.files); }}>
                 <div>
                   <strong>上传任意格式出库单</strong>
-                  <div className="muted">支持 Excel / Word / PDF，先由 LLM 生成规则，再人工确认解析</div>
+                  <div className="muted">继续复用 V2 文件解析和规则引擎；提交时进入异步任务链路。</div>
                   {file && <div className="muted">当前文件：{file.fileName}</div>}
                 </div>
                 <input ref={inputRef} hidden type="file" accept=".xlsx,.xls,.csv,.docx,.pdf,.txt" onChange={(event) => void handleFiles(event.target.files)} />
                 <button className="btn primary" onClick={() => inputRef.current?.click()}><UploadCloud size={16} />导入</button>
               </div>
-              {progress > 0 && <div style={{ marginTop: 10 }}><div className="progress"><span style={{ width: `${progress}%` }} /></div><div className="muted">{busy || "处理完成"} {progress}%</div></div>}
-              <div className="toolbar" style={{ paddingInline: 0 }}>
-                <div className="toolbar-group">
-                  <button className="btn soft" onClick={() => void generateRule()} disabled={!file || Boolean(busy)}>{busy.includes("AI") ? <Loader2 size={15} className="spin" /> : <FileInput size={15} />}AI生成规则</button>
-                  <button className="btn" onClick={() => useRule(makeManualRule())}><Plus size={15} />新建规则</button>
-                  <button className="btn primary" onClick={saveRule}><Save size={15} />保存规则</button>
-                  <button className="btn primary" onClick={executeParse}><CheckCircle2 size={15} />试解析</button>
-                </div>
+              {progress > 0 && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
+              <div className="toolbar rule-actions" style={{ paddingInline: 0 }}>
+                <button className="btn soft" onClick={() => void generateRule()} disabled={!file || Boolean(busy)}>{busy.includes("AI") ? <Loader2 size={15} className="spin" /> : <FileInput size={15} />}AI 生成规则</button>
+                <button className="btn" onClick={() => useRule(makeManualRule())}><Plus size={15} />新建规则</button>
+                <button className="btn primary" onClick={saveRule}><Save size={15} />保存规则</button>
+                <button className="btn primary" onClick={executeParse}><CheckCircle2 size={15} />试解析</button>
               </div>
               <textarea className="textarea" value={ruleDraft} onChange={(event) => setRuleDraft(event.target.value)} placeholder="上传文件后生成或手动填写解析规则 JSON" />
-              <div className="muted" style={{ marginTop: 8 }}>AI 推测映射会在 JSON 中以 guessed/confidence 标记，保存前可手动微调。</div>
             </div>
 
             <div className="panel rule-editor">
               <div className="toolbar" style={{ paddingInline: 0, paddingTop: 0 }}>
                 <strong>解析规则库</strong>
-                <span className="muted">手动选择规则，不自动匹配</span>
+                <span className="muted">上传时手动选择规则，不自动匹配。</span>
               </div>
               {rules.length === 0 && <div className="empty">暂无已保存规则</div>}
               {rules.map((rule) => (
                 <div className={`rule-card ${activeRule?.id === rule.id ? "active" : ""}`} key={rule.id} onClick={() => useRule(rule)}>
-                  <div className="rule-card-head">
-                    <strong>{rule.name}</strong>
-                    <span className="rule-actions">
-                      <button className="link-btn" onClick={(event) => { event.stopPropagation(); void copyRule(rule); }}>复制</button>
-                      <button className="link-btn danger-text" onClick={(event) => { event.stopPropagation(); void deleteRule(rule); }}>删除</button>
-                    </span>
-                  </div>
+                  <strong>{rule.name}</strong>
                   <div className="muted">{rule.description}</div>
-                  <div className="muted">类型：{rule.sourceKind} · Sheet：{rule.sheetMode} · 映射：{rule.mappings.length}</div>
+                  <div className="muted">类型：{rule.sourceKind} / Sheet：{rule.sheetMode} / 映射：{rule.mappings.length}</div>
+                  <button className="link-btn danger-text" onClick={(event) => { event.stopPropagation(); void deleteRule(rule); }}>删除</button>
                 </div>
               ))}
             </div>
           </div>}
 
-          {activeTab === "import" && <div className="panel">
+          {activeSection === "import" && <div className="panel">
             <div className="toolbar">
               <div className="toolbar-group">
-                <button className="btn primary" onClick={() => { setRows((current) => [emptyOrderRow(), ...current]); setPreviewPage(1); }}><Plus size={15} />新增</button>
-                <button className="btn danger" onClick={() => setRows((current) => current.slice(1))}><Trash2 size={15} />删除首行</button>
-                <button className="btn soft" onClick={exportExcel} disabled={!rows.length}><ArrowDownToLine size={15} />导出Excel</button>
-                <button className="btn primary" onClick={submitOrders} disabled={Boolean(busy) || errors.length > 0 || rows.length === 0}><Send size={15} />提交下单</button>
+                <button className="btn primary" onClick={() => { setRows((current) => [emptyOrderRow(), ...current]); setSelectedRowIds(new Set()); }}><Plus size={15} />新增</button>
+                <button className="btn danger" onClick={deleteSelectedRows} disabled={!selectedRowIds.size}><Trash2 size={15} />删除选中</button>
+                <button className="btn soft" onClick={exportExcel} disabled={!rows.length}><ArrowDownToLine size={15} />导出 Excel</button>
+                <button className="btn primary" onClick={submitOrders} disabled={Boolean(busy) || errors.length > 0 || rows.length === 0}>{busy === "创建异步导入任务" ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{busy === "创建异步导入任务" ? "提交中" : "异步提交下单"}</button>
               </div>
               <div className="toolbar-group">
-                <span className={`status-pill ${errors.length ? "bad" : "ok"}`}>{errors.length ? `${errors.length} 个错误` : "校验通过"}</span>
-                <span className="muted">共 {rows.length} 条 · 每页渲染 {previewPageSize} 条</span>
+                <span className={`status-pill ${errors.length ? "bad" : "ok"}`}>{errors.length ? `${errors.length} 个错误` : "本地校验通过"}</span>
+                <span className="muted">已选 {selectedRowIds.size} 行</span>
+                <span className="muted">共 {rows.length} 行</span>
               </div>
             </div>
-            {previewRule?.sourceKind === "cards" ? (
-              <CardPreview rule={previewRule} rows={pagedRows} errors={errorMap} onItemChange={updateCell} onGroupChange={updateGroupCells} onDelete={deleteRow} />
-            ) : (
-              <EditableTable rows={pagedRows} columns={previewColumns} errors={errorMap} onChange={updateCell} onDelete={deleteRow} startIndex={(previewPage - 1) * previewPageSize} />
-            )}
-            <div className="pager">
-              <span>预览 {rows.length} 条</span>
-              <button className="btn" disabled={previewPage <= 1} onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}>上一页</button>
-              <span>{previewPage} / {totalPreviewPages}</span>
-              <button className="btn" disabled={previewPage >= totalPreviewPages} onClick={() => setPreviewPage((page) => Math.min(totalPreviewPages, page + 1))}>下一页</button>
-            </div>
-            {errors.length > 0 && (
-              <div className="error-list">
-                {errors.map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 · {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}
-              </div>
-            )}
-            {rawInfo && (
-              <div className="raw-info">
-                <strong>原始文件信息</strong>
-                <pre>{rawInfo}</pre>
-              </div>
-            )}
+            <EditableTable rows={visibleRows} selectedRowIds={selectedRowIds} errors={errorMap} onChange={updateCell} onToggleRow={toggleRowSelection} onToggleAll={toggleVisibleRowsSelection} />
+            {errors.length > 0 && <div className="error-list">{errors.slice(0, 100).map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 / {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}</div>}
           </div>}
 
-          <div className="panel history" id="history-panel">
+          {activeSection === "tasks" && <div className="grid-2">
+            <div className="panel">
+              <div className="toolbar">
+                <div className="toolbar-group"><Activity size={16} /><strong>任务进度追踪</strong><span className="muted">轮询状态并推进 outbox 消费。</span></div>
+                <div className="toolbar-group">
+                  <button className="btn" onClick={() => void handlePumpQueue()}><RefreshCw size={15} />推进队列</button>
+                  <button className="btn" onClick={() => void handleRefreshTasks()}>刷新任务</button>
+                </div>
+              </div>
+              <TaskProgress task={currentTask} />
+            </div>
+
+            <div className="panel">
+              <div className="toolbar"><Database size={16} /><strong>监控告警</strong><span className="muted">队列积压、错误分布、任务状态。</span></div>
+              <MonitorPanel monitor={monitor} />
+            </div>
+          </div>}
+
+          {activeSection === "tasks" && <div className="panel">
             <div className="toolbar">
-              <div className="toolbar-group"><FileSpreadsheet size={16} /><strong>已导入运单列表</strong><span className="muted">从服务端读取，支持筛选分页展示</span></div>
+              <div className="toolbar-group"><ClipboardList size={16} /><strong>最近任务</strong></div>
+            </div>
+            <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} onOpen={(taskId) => void handleOpenTask(taskId)} />
+          </div>}
+
+          {activeSection === "monitor" && <div className="grid-2">
+            <div className="panel">
+              <div className="toolbar"><Database size={16} /><strong>监控告警</strong><span className="muted">吞吐、积压、阶段耗时和错误分布。</span></div>
+              <MonitorPanel monitor={monitor} />
+            </div>
+            <div className="panel">
+              <div className="toolbar">
+                <div className="toolbar-group"><ClipboardList size={16} /><strong>最近任务</strong></div>
+                <button className="btn" onClick={() => void handleRefreshTasks()}><RefreshCw size={15} />刷新</button>
+              </div>
+              <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} onOpen={(taskId) => { setActiveSection("tasks"); void handleOpenTask(taskId); }} />
+            </div>
+          </div>}
+
+          {activeSection === "monitor" && <div className="panel history">
+            <div className="toolbar">
+              <div className="toolbar-group"><FileSpreadsheet size={16} /><strong>已导入运单列表</strong><span className="muted">服务端读取，按外部编码聚合。</span></div>
               <div className="toolbar-group">
                 <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="外部编码/姓名/门店" />
-                <button className="btn primary" onClick={() => { setHistoryPage(1); void refreshHistory(keyword); }}>查询</button>
+                <button className="btn primary" onClick={() => void refreshHistory(keyword)}><Search size={15} />查询</button>
               </div>
             </div>
-            <HistoryTable orders={pagedHistory} />
-            <div className="pager">
-              <span>共 {historyOrders.length} 单 / {history.length} 条明细</span>
-              <button className="btn" disabled={historyPage <= 1} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}>上一页</button>
-              <span>{historyPage} / {totalHistoryPages}</span>
-              <button className="btn" disabled={historyPage >= totalHistoryPages} onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}>下一页</button>
-            </div>
-          </div>
+            <HistoryTable orders={pagedHistoryOrders} expandedCodes={expandedHistoryCodes} onToggle={(externalCode) => setExpandedHistoryCodes((current) => { const next = new Set(current); if (next.has(externalCode)) next.delete(externalCode); else next.add(externalCode); return next; })} />
+            <div className="pagination-bar"><button className="btn" disabled={currentHistoryPage <= 1} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}>上一页</button><span className="muted">第 {currentHistoryPage} / {totalHistoryPages} 页，共 {historyOrders.length} 条</span><button className="btn" disabled={currentHistoryPage >= totalHistoryPages} onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}>下一页</button></div>
+          </div>}
         </section>
       </main>
     </div>
   );
 }
 
-function EditableTable({ rows, columns, errors, onChange, onDelete, startIndex = 0 }: { rows: OrderRow[]; columns: PreviewColumn[]; errors: Map<string, Set<string>>; onChange: (rowId: string, field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void; startIndex?: number }) {
-  if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
-  const visibleColumns: PreviewColumn[] = columns.length ? columns : editableFields.map((field) => ({ kind: "field", field, label: fieldLabels[field] }));
+function EditableTable({
+  rows,
+  selectedRowIds,
+  errors,
+  onChange,
+  onToggleRow,
+  onToggleAll
+}: {
+  rows: OrderRow[];
+  selectedRowIds: Set<string>;
+  errors: Map<string, Set<string>>;
+  onChange: (rowId: string, field: CanonicalField, value: string) => void;
+  onToggleRow: (rowId: string, checked: boolean) => void;
+  onToggleAll: (rows: OrderRow[], checked: boolean) => void;
+}) {
+  if (!rows.length) return <div className="empty">上传文件并试解析后，结构化订单会显示在这里。</div>;
+  const allSelected = rows.length > 0 && rows.every((row) => selectedRowIds.has(row.id));
+  const someSelected = rows.some((row) => selectedRowIds.has(row.id));
   return (
     <div className="table-wrap">
       <table>
         <thead>
-          <tr><th>序号</th>{visibleColumns.map((column) => <th key={columnKey(column)}>{column.label}</th>)}<th>操作</th></tr>
+          <tr>
+            <th className="select-col">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                ref={(input) => {
+                  if (input) input.indeterminate = someSelected && !allSelected;
+                }}
+                onChange={(event) => onToggleAll(rows, event.currentTarget.checked)}
+                aria-label="选择当前显示行"
+              />
+            </th>
+            <th>序号</th>
+            {editableFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}
+          </tr>
         </thead>
         <tbody>
           {rows.map((row, index) => {
             const rowErrors = errors.get(row.id);
             return (
               <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
-                <td>{startIndex + index + 1}</td>
-                {visibleColumns.map((column) => (
-                  <td key={columnKey(column)} className={(column.kind === "field" && (rowErrors?.has(column.field) || rowErrors?.has("row"))) ? "error-cell" : ""}>
-                    {column.kind === "field" ? (
-                      <input value={String(row[column.field] ?? "")} onChange={(event) => onChange(row.id, column.field, event.target.value)} />
-                    ) : (
-                      <span className="readonly-cell">{String(readColumnValue(row, column) ?? "")}</span>
-                    )}
+                <td className="select-col">
+                  <input
+                    type="checkbox"
+                    checked={selectedRowIds.has(row.id)}
+                    onChange={(event) => onToggleRow(row.id, event.currentTarget.checked)}
+                    aria-label={`选择第 ${index + 1} 行`}
+                  />
+                </td>
+                <td>{index + 1}</td>
+                {editableFields.map((field) => (
+                  <td key={field} className={rowErrors?.has(field) || rowErrors?.has("row") ? "error-cell" : ""}>
+                    <input value={String(row[field] ?? "")} onChange={(event) => onChange(row.id, field, event.target.value)} />
                   </td>
                 ))}
-                <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
               </tr>
             );
           })}
@@ -508,105 +671,146 @@ function EditableTable({ rows, columns, errors, onChange, onDelete, startIndex =
   );
 }
 
-function CardPreview({ rule, rows, errors, onItemChange, onGroupChange, onDelete }: { rule: ParseRule | null; rows: OrderRow[]; errors: Map<string, Set<string>>; onItemChange: (rowId: string, field: CanonicalField, value: string) => void; onGroupChange: (rowIds: string[], field: CanonicalField, value: string) => void; onDelete: (rowId: string) => void }) {
-  if (!rows.length) return <div className="empty">上传文件并执行试解析后，结构化订单会显示在这里</div>;
-  const receiverColumns = cardReceiverFields.map((field) => ({ field, label: rule?.card?.infoLabels?.[field] || fieldLabels[field] }));
-  const itemColumns = cardItemFields.map((field) => ({ field, label: rule?.card?.itemHeaderLabels?.[field] || fieldLabels[field] }));
-  const groups = Array.from(rows.reduce((map, row) => {
-    const key = row.externalCode || row.remark || row.id;
-    const list = map.get(key) ?? [];
-    list.push(row);
-    map.set(key, list);
-    return map;
-  }, new Map<string, OrderRow[]>()).values());
-
+function TaskProgress({ task }: { task: ImportTaskView | null }) {
+  if (!task) return <div className="empty">暂无任务。点击“异步提交下单”后会创建任务。</div>;
   return (
-    <div className="card-preview">
-      {groups.map((group) => {
-        const first = group[0];
-        const rowIds = group.map((row) => row.id);
-        const hasError = group.some((row) => errors.get(row.id)?.size);
-        return (
-          <div className="order-card" key={first.externalCode || first.remark || first.id}>
-            <div className="order-card-head">
-              <strong>{first.remark || first.externalCode || "调拨记录"}</strong>
-              <span className={`status-pill ${hasError ? "bad" : "ok"}`}>{group.length} 个 SKU</span>
-            </div>
-            <div className="card-info-grid">
-              {receiverColumns.map((column) => (
-                <label key={column.field}>
-                  <span>{column.label}</span>
-                  <input value={String(first[column.field] ?? "")} onChange={(event) => onGroupChange(rowIds, column.field, event.target.value)} />
-                </label>
-              ))}
-            </div>
-            <div className="table-wrap card-items">
-              <table>
-                <thead><tr>{itemColumns.map((column) => <th key={column.field}>{column.label}</th>)}<th>操作</th></tr></thead>
-                <tbody>
-                  {group.map((row) => {
-                    const rowErrors = errors.get(row.id);
-                    return (
-                      <tr key={row.id} className={rowErrors?.size ? "error-row" : ""}>
-                        {itemColumns.map((column) => (
-                          <td key={column.field} className={rowErrors?.has(column.field) || rowErrors?.has("row") ? "error-cell" : ""}>
-                            <input value={String(row[column.field] ?? "")} onChange={(event) => onItemChange(row.id, column.field, event.target.value)} />
-                          </td>
-                        ))}
-                        <td><button className="link-btn danger-text" onClick={() => onDelete(row.id)}>删除</button></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        );
-      })}
+    <div style={{ padding: "12px 16px" }}>
+      <div className="toolbar" style={{ paddingInline: 0 }}>
+        <span className={`status-pill ${task.failed_rows ? "bad" : "ok"}`}>{task.status}</span>
+        <span className="muted">task_id: {task.task_id}</span>
+        <span className="muted">trace_id: {task.trace_id}</span>
+      </div>
+      <div className="progress"><span style={{ width: `${task.progress}%` }} /></div>
+      <div className="toolbar" style={{ paddingInline: 0 }}>
+        <span>进度 {task.processed_rows}/{task.total_rows}</span>
+        <span>成功 {task.success_rows}</span>
+        <span>失败 {task.failed_rows}</span>
+        <span>批次 {task.completed_batches}/{task.total_batches}</span>
+      </div>
+      {(task.degraded || task.warning) && <div className="notice danger"><AlertTriangle size={16} />{task.warning ?? "SKU 校验已降级，本次导入需后续复核。"}</div>}
+      {task.recent_errors?.length ? <div className="error-list">{task.recent_errors.map((error, index) => <div key={index}>批次 {error.batchIndex} / 第 {error.rowNumber} 行 / {error.fieldName} / {error.errorCode}：{error.errorReason}，原始值：{error.rawValue}</div>)}</div> : <div className="muted">暂无行级错误。</div>}
+      {task.batches?.length ? (
+        <div className="table-wrap" style={{ maxHeight: 260, marginTop: 12 }}>
+          <table>
+            <thead><tr><th>批次</th><th>unit_id</th><th>行范围</th><th>状态</th><th>重试</th></tr></thead>
+            <tbody>{task.batches.map((batch) => <tr key={batch.unitId}><td>{batch.batchIndex}</td><td>{batch.unitId}</td><td>{batch.startRow}-{batch.endRow}</td><td>{batch.status}</td><td>{batch.retryCount}</td></tr>)}</tbody>
+          </table>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function HistoryTable({ orders }: { orders: HistoryOrder[] }) {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+function TaskList({
+  tasks,
+  activeTaskId,
+  onOpen
+}: {
+  tasks: Array<{ id: string; traceId: string; status: string; totalRows: number; processedRows: number; failedRows: number }>;
+  activeTaskId?: string;
+  onOpen: (taskId: string) => void;
+}) {
+  if (!tasks.length) return <div className="empty">暂无任务记录。</div>;
+  return (
+    <div className="table-wrap" style={{ maxHeight: 260 }}>
+      <table>
+        <thead><tr><th>task_id</th><th>trace_id</th><th>状态</th><th>进度</th><th>失败行</th><th>操作</th></tr></thead>
+        <tbody>{tasks.map((task) => <tr key={task.id} className={activeTaskId === task.id ? "active-row" : ""}><td>{task.id}</td><td>{task.traceId}</td><td>{task.status}</td><td>{task.processedRows}/{task.totalRows}</td><td>{task.failedRows}</td><td><button className="link-btn" onClick={() => onOpen(task.id)}>查看</button></td></tr>)}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function MonitorPanel({ monitor }: { monitor: MonitorSummary | null }) {
+  if (!monitor) return <div className="empty">暂无监控数据。</div>;
+  return (
+    <div style={{ padding: "12px 16px" }}>
+      <div className="metric-grid">
+        <div className="mini-card"><strong>{Math.round(monitor.throughputRowsPerMinute ?? 0)}</strong><span>近 5 分钟行/分钟</span></div>
+        <div className="mini-card"><strong>{monitor.pendingEvents ?? 0}</strong><span>Outbox 待投递</span></div>
+        <div className="mini-card"><strong>{monitor.taskStatus?.reduce((sum, item) => sum + Number(item.count), 0) ?? 0}</strong><span>任务总数</span></div>
+        <div className="mini-card"><strong>{monitor.queueAlert ?? "OK"}</strong><span>队列告警</span></div>
+      </div>
+      {monitor.stageStats ? (
+        <>
+          <div className="muted" style={{ marginTop: 10 }}>阶段耗时 P50 / P95 / P99 ms</div>
+          <div className="table-wrap" style={{ maxHeight: 220, marginTop: 8 }}>
+            <table>
+              <thead><tr><th>阶段</th><th>P50</th><th>P95</th><th>P99</th></tr></thead>
+              <tbody>
+                {Object.entries(monitor.stageStats).map(([stage, stat]) => (
+                  <tr key={stage}><td>{stage}</td><td>{stat.p50}</td><td>{stat.p95}</td><td>{stat.p99}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+      <div className="muted" style={{ marginTop: 10 }}>错误分布</div>
+      {(monitor.errorCounts ?? []).map((item) => <div key={item.error_code}>{item.error_code}: {item.count}</div>)}
+    </div>
+  );
+}
+
+function HistoryTable({
+  orders,
+  expandedCodes,
+  onToggle
+}: {
+  orders: Array<{ externalCode: string; first: OrderRow; items: OrderRow[]; totalQuantity: number }>;
+  expandedCodes: Set<string>;
+  onToggle: (externalCode: string) => void;
+}) {
   if (!orders.length) return <div className="empty">暂无历史运单</div>;
   return (
-    <div className="table-wrap history-wrap" style={{ maxHeight: 420 }}>
+    <div className="table-wrap history-wrap" style={{ maxHeight: 520 }}>
       <table className="history-table">
-        <thead><tr><th>外部编码</th><th>收货门店</th><th>收件人姓名</th><th>收件人电话</th><th>收件人地址</th><th>SKU数</th><th>总数量</th><th>操作</th></tr></thead>
+        <thead>
+          <tr>
+            <th>外部编码</th>
+            <th>收货门店</th>
+            <th>收件人</th>
+            <th>电话</th>
+            <th>地址</th>
+            <th>SKU 物品编码</th>
+            <th>SKU 物品名称</th>
+            <th>SKU 发货数量</th>
+            <th>SKU 规格型号</th>
+            <th>操作</th>
+          </tr>
+        </thead>
         <tbody>
-          {orders.map((order) => {
-            const isOpen = expanded[order.externalCode] ?? true;
-            return (
-              <Fragment key={order.externalCode}>
-                <tr key={order.externalCode} className="history-order-row">
-                  <td>{order.externalCode}</td>
-                  <td>{order.first.storeName}</td>
-                  <td>{order.first.receiverName}</td>
-                  <td>{order.first.receiverPhone}</td>
-                  <td>{order.first.receiverAddress}</td>
-                  <td>{order.rows.length}</td>
-                  <td>{order.totalQuantity}</td>
-                  <td><button className="link-btn" onClick={() => setExpanded((current) => ({ ...current, [order.externalCode]: !isOpen }))}>{isOpen ? "收起明细" : "展开明细"}</button></td>
+          {orders.flatMap((order) => {
+            const expanded = expandedCodes.has(order.externalCode);
+            const uniqueSkuCount = new Set(order.items.map((item) => `${item.skuCode}|${item.skuName}|${item.skuSpec}`)).size;
+            return [
+              <tr key={`${order.externalCode}-summary`} className="summary-row">
+                <td>{order.externalCode}</td>
+                <td>{order.first.storeName}</td>
+                <td>{order.first.receiverName}</td>
+                <td>{order.first.receiverPhone}</td>
+                <td>{order.first.receiverAddress}</td>
+                <td>SKU 数：{uniqueSkuCount}</td>
+                <td />
+                <td>总数量：{order.totalQuantity}</td>
+                <td />
+                <td><button className="link-btn" onClick={() => onToggle(order.externalCode)}>{expanded ? "收起" : "查看明细"}</button></td>
+              </tr>,
+              ...(expanded ? order.items.map((item, index) => (
+                <tr key={`${order.externalCode}-${item.id}-${index}`} className="detail-row">
+                  <td>{item.externalCode}</td>
+                  <td>{item.storeName}</td>
+                  <td>{item.receiverName}</td>
+                  <td>{item.receiverPhone}</td>
+                  <td>{item.receiverAddress}</td>
+                  <td>{item.skuCode}</td>
+                  <td>{item.skuName}</td>
+                  <td>{item.quantity}</td>
+                  <td>{item.skuSpec}</td>
+                  <td>明细 {index + 1}</td>
                 </tr>
-                {isOpen && (
-                  <tr key={`${order.externalCode}-items`} className="history-detail-row">
-                    <td colSpan={8}>
-                      <table className="history-detail-table">
-                        <thead><tr><th>SKU物品编码</th><th>SKU物品名称</th><th>SKU发货数量</th><th>SKU规格型号</th><th>备注</th></tr></thead>
-                        <tbody>
-                          {order.rows.map((row) => (
-                            <tr key={row.id}>
-                              <td>{row.skuCode}</td><td>{row.skuName}</td><td>{row.quantity}</td><td>{row.skuSpec}</td><td>{row.remark}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            );
+              )) : [])
+            ];
           })}
         </tbody>
       </table>

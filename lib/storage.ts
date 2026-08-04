@@ -7,9 +7,24 @@ const orders: OrderRow[] = [];
 const connectionString = process.env.DATABASE_URL ?? process.env.POSTGRES_URL;
 const pool = connectionString ? createPool({ connectionString }) : null;
 let initPromise: Promise<void> | null = null;
+let databaseUnavailable = false;
+
+function upsertMemoryOrders(rows: OrderRow[]) {
+  for (const row of rows) {
+    const index = orders.findIndex((item) => item.id === row.id);
+    if (index >= 0) orders[index] = row;
+    else orders.unshift(row);
+  }
+}
+
+function markDatabaseUnavailable(error: unknown) {
+  databaseUnavailable = true;
+  initPromise = null;
+  console.warn("Order database unavailable, fallback to memory store:", error instanceof Error ? error.message : error);
+}
 
 async function ensureTables() {
-  if (!pool) return;
+  if (!pool || databaseUnavailable) return;
   initPromise ??= (async () => {
     await pool.sql`
       CREATE TABLE IF NOT EXISTS parse_rules (
@@ -36,15 +51,15 @@ async function ensureTables() {
 }
 
 export const store = {
-  isDatabaseEnabled: () => Boolean(pool),
+  isDatabaseEnabled: () => Boolean(pool) && !databaseUnavailable,
   listRules: async () => {
-    if (!pool) return rules;
+    if (!pool || databaseUnavailable) return rules;
     await ensureTables();
     const result = await pool.sql`SELECT payload FROM parse_rules ORDER BY updated_at DESC`;
     return result.rows.map((row) => row.payload as ParseRule);
   },
   saveRule: async (rule: ParseRule) => {
-    if (!pool) {
+    if (!pool || databaseUnavailable) {
       const index = rules.findIndex((item) => item.id === rule.id);
       if (index >= 0) rules[index] = rule;
       else rules.unshift(rule);
@@ -60,7 +75,7 @@ export const store = {
     return rule;
   },
   deleteRule: async (id: string) => {
-    if (!pool) {
+    if (!pool || databaseUnavailable) {
       const index = rules.findIndex((rule) => rule.id === id);
       if (index >= 0) rules.splice(index, 1);
       return;
@@ -69,7 +84,7 @@ export const store = {
     await pool.sql`DELETE FROM parse_rules WHERE id = ${id}`;
   },
   listOrders: async (keyword = "") => {
-    if (!pool) {
+    if (!pool || databaseUnavailable) {
       return orders.filter((row) => {
         if (!keyword) return true;
         return [row.externalCode, row.receiverName, row.storeName, row.receiverPhone].some((value) => value.includes(keyword));
@@ -93,8 +108,8 @@ export const store = {
     return result.rows.map((row) => row.payload as OrderRow);
   },
   saveOrders: async (rows: OrderRow[]) => {
-    if (!pool) {
-      orders.unshift(...rows);
+    if (!pool || databaseUnavailable) {
+      upsertMemoryOrders(rows);
       return rows;
     }
     await ensureTables();
@@ -112,8 +127,46 @@ export const store = {
     }
     return rows;
   },
+  saveOrdersBulk: async (rows: OrderRow[]) => {
+    if (!rows.length) return rows;
+    if (!pool || databaseUnavailable) {
+      upsertMemoryOrders(rows);
+      return rows;
+    }
+    try {
+      await ensureTables();
+      if (databaseUnavailable) {
+        upsertMemoryOrders(rows);
+        return rows;
+      }
+      await pool.query(
+        `INSERT INTO orders (id, external_code, receiver_name, store_name, payload, created_at)
+         SELECT id, external_code, receiver_name, store_name, payload, NOW()
+         FROM jsonb_to_recordset($1::jsonb)
+         AS x(id text, external_code text, receiver_name text, store_name text, payload jsonb)
+         ON CONFLICT (id)
+         DO UPDATE SET
+           external_code = EXCLUDED.external_code,
+           receiver_name = EXCLUDED.receiver_name,
+           store_name = EXCLUDED.store_name,
+           payload = EXCLUDED.payload`,
+        [JSON.stringify(rows.map((row) => ({
+          id: row.id,
+          external_code: row.externalCode,
+          receiver_name: row.receiverName,
+          store_name: row.storeName,
+          payload: row
+        })))]
+      );
+      return rows;
+    } catch (error) {
+      markDatabaseUnavailable(error);
+      upsertMemoryOrders(rows);
+      return rows;
+    }
+  },
   clearOrders: async () => {
-    if (!pool) {
+    if (!pool || databaseUnavailable) {
       orders.splice(0, orders.length);
       return;
     }
@@ -136,7 +189,7 @@ export const memoryStore = {
   },
   listOrders: () => orders,
   saveOrders: (rows: OrderRow[]) => {
-    orders.unshift(...rows);
+    upsertMemoryOrders(rows);
     return rows;
   },
   clearOrders: () => {

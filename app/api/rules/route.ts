@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { normalizeParseRule } from "@/lib/rule-engine";
 import { store } from "@/lib/storage";
 import { ParseRule } from "@/lib/types";
 
@@ -9,7 +10,7 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
-  const rule = (await request.json()) as ParseRule;
+  const rule = normalizeParseRule((await request.json()) as Partial<ParseRule>);
   const saved = await store.saveRule({
     ...rule,
     updatedAt: new Date().toISOString()
@@ -20,7 +21,7 @@ export async function POST(request: NextRequest) {
 export async function DELETE(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get("id");
-  if (!id) return NextResponse.json({ error: "缺少规则 ID" }, { status: 400 });
+  if (!id) return NextResponse.json({ error: "missing id" }, { status: 400 });
   await store.deleteRule(id);
-  return NextResponse.json({ ok: true, database: store.isDatabaseEnabled() });
+  return NextResponse.json({ success: true, database: store.isDatabaseEnabled() });
 }

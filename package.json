@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --test scripts/test-v4-static.cjs",
+    "seed:v4": "node scripts/seed-v4-data.cjs",
+    "perf:v4": "node scripts/perf-v4-import.cjs"
   },
   "dependencies": {
     "@vercel/postgres": "^0.10.0",
