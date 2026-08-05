@@ -36,6 +36,14 @@ function markDatabaseUnavailable(error: unknown) {
   console.warn("Import database unavailable, fallback to memory store:", error instanceof Error ? error.message : error);
 }
 
+function isMissingRelation(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "42P01";
+}
+
+function listMemoryTasks(limit = 20) {
+  return Array.from(tasks.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+}
+
 function persistImportTaskInMemory(task: ImportTask, batchList: ImportTaskBatch[], rows: OrderRow[], events: OutboxEvent[]) {
   tasks.set(task.id, task);
   batchList.forEach((batch) => batches.set(batch.id, batch));
@@ -169,6 +177,9 @@ async function ensureImportTables() {
     await pool.sql`CREATE INDEX IF NOT EXISTS event_outbox_status_retry_idx ON event_outbox(status, next_retry_at)`;
     await pool.sql`CREATE INDEX IF NOT EXISTS batch_performance_task_unit_idx ON batch_performance_log(task_id, unit_id)`;
     await pool.sql`CREATE INDEX IF NOT EXISTS trace_events_trace_time_idx ON trace_events(trace_id, occurred_at)`;
+    await pool.sql`CREATE INDEX IF NOT EXISTS import_tasks_created_at_idx ON import_tasks(created_at DESC)`;
+    await pool.sql`CREATE INDEX IF NOT EXISTS import_tasks_updated_at_idx ON import_tasks(updated_at DESC)`;
+    await pool.sql`CREATE INDEX IF NOT EXISTS batch_performance_created_at_idx ON batch_performance_log(created_at DESC)`;
   })();
   await initPromise;
 }
@@ -296,9 +307,8 @@ export const importStore = {
 
     if (!pool || databaseUnavailable) return persistImportTaskInMemory(task, batchList, input.rows, events);
 
-    try {
-      await ensureImportTables();
-      const batchPayload = JSON.stringify(batchList.map((batch) => ({
+    const db = pool;
+    const batchPayload = JSON.stringify(batchList.map((batch) => ({
       id: batch.id,
       task_id: batch.taskId,
       trace_id: batch.traceId,
@@ -307,12 +317,12 @@ export const importStore = {
       start_row: batch.startRow,
       end_row: batch.endRow,
       status: batch.status
-      })));
-      const rowPayload = JSON.stringify(input.rows.map((row, index) => {
+    })));
+    const rowPayload = JSON.stringify(input.rows.map((row, index) => {
       const batchIndex = Math.floor(index / batchSize);
       return { task_id: id, row_number: index + 1, unit_id: batchList[batchIndex].unitId, payload: row };
-      }));
-      const eventPayload = JSON.stringify(events.map((event) => ({
+    }));
+    const eventPayload = JSON.stringify(events.map((event) => ({
       id: event.id,
       aggregate_id: event.aggregateId,
       event_type: event.eventType,
@@ -323,50 +333,64 @@ export const importStore = {
       retry_count: event.retryCount,
       next_retry_at: event.nextRetryAt,
       created_at: event.createdAt
-      })));
-      await pool.query(
-      `WITH inserted_task AS (
-         INSERT INTO import_tasks (id, file_name, rule_id, status, total_rows, total_batches, trace_id, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
-         RETURNING id
-       ), inserted_batches AS (
-         INSERT INTO import_task_batches (id, task_id, trace_id, unit_id, batch_index, start_row, end_row, status)
-         SELECT * FROM jsonb_to_recordset($8::jsonb)
-         AS x(id text, task_id text, trace_id text, unit_id text, batch_index int, start_row int, end_row int, status text)
-         RETURNING id
-       ), inserted_rows AS (
-         INSERT INTO import_task_rows (task_id, row_number, unit_id, payload)
-         SELECT * FROM jsonb_to_recordset($9::jsonb)
-         AS x(task_id text, row_number int, unit_id text, payload jsonb)
-         ON CONFLICT (task_id, row_number) DO UPDATE SET payload = EXCLUDED.payload
-         RETURNING task_id
-       ), inserted_events AS (
-         INSERT INTO event_outbox (id, aggregate_id, event_type, schema_version, trace_id, payload, status, retry_count, next_retry_at, created_at)
-         SELECT * FROM jsonb_to_recordset($10::jsonb)
-         AS x(id text, aggregate_id text, event_type text, schema_version int, trace_id text, payload jsonb, status text, retry_count int, next_retry_at timestamptz, created_at timestamptz)
-         RETURNING id
-       )
-       INSERT INTO trace_events (id, trace_id, task_id, event_name, event_status, message, occurred_at)
-       VALUES ($11,$7,$1,'ImportTaskCreated','INFO',$12,NOW())`,
-      [task.id, task.fileName, task.ruleId, task.status, task.totalRows, task.totalBatches, task.traceId, batchPayload, rowPayload, eventPayload, importUid("trc"), `created ${totalBatches} batches`]
+    })));
+    const persistToDatabase = async () => {
+      await db.query(
+        `WITH inserted_task AS (
+           INSERT INTO import_tasks (id, file_name, rule_id, status, total_rows, total_batches, trace_id, created_at, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+           RETURNING id
+         ), inserted_batches AS (
+           INSERT INTO import_task_batches (id, task_id, trace_id, unit_id, batch_index, start_row, end_row, status)
+           SELECT * FROM jsonb_to_recordset($8::jsonb)
+           AS x(id text, task_id text, trace_id text, unit_id text, batch_index int, start_row int, end_row int, status text)
+           RETURNING id
+         ), inserted_rows AS (
+           INSERT INTO import_task_rows (task_id, row_number, unit_id, payload)
+           SELECT * FROM jsonb_to_recordset($9::jsonb)
+           AS x(task_id text, row_number int, unit_id text, payload jsonb)
+           ON CONFLICT (task_id, row_number) DO UPDATE SET payload = EXCLUDED.payload
+           RETURNING task_id
+         ), inserted_events AS (
+           INSERT INTO event_outbox (id, aggregate_id, event_type, schema_version, trace_id, payload, status, retry_count, next_retry_at, created_at)
+           SELECT * FROM jsonb_to_recordset($10::jsonb)
+           AS x(id text, aggregate_id text, event_type text, schema_version int, trace_id text, payload jsonb, status text, retry_count int, next_retry_at timestamptz, created_at timestamptz)
+           RETURNING id
+         )
+         INSERT INTO trace_events (id, trace_id, task_id, event_name, event_status, message, occurred_at)
+         VALUES ($11,$7,$1,'ImportTaskCreated','INFO',$12,NOW())`,
+        [task.id, task.fileName, task.ruleId, task.status, task.totalRows, task.totalBatches, task.traceId, batchPayload, rowPayload, eventPayload, importUid("trc"), `created ${totalBatches} batches`]
       );
+    };
+
+    try {
+      await persistToDatabase();
       return { task, batches: batchList };
     } catch (error) {
+      if (isMissingRelation(error)) {
+        await ensureImportTables();
+        if (databaseUnavailable) return persistImportTaskInMemory(task, batchList, input.rows, events);
+        await persistToDatabase();
+        return { task, batches: batchList };
+      }
       markDatabaseUnavailable(error);
       return persistImportTaskInMemory(task, batchList, input.rows, events);
     }
   },
 
   listTasks: async (limit = 20) => {
-    if (!pool || databaseUnavailable) return Array.from(tasks.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+    if (!pool || databaseUnavailable) return listMemoryTasks(limit);
     try {
-      await ensureImportTables();
-      if (databaseUnavailable) return Array.from(tasks.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
       const result = await pool.query("SELECT * FROM import_tasks ORDER BY created_at DESC LIMIT $1", [limit]);
       return result.rows.map(toTask);
     } catch (error) {
+      if (isMissingRelation(error)) {
+        await ensureImportTables();
+        const result = await pool.query("SELECT * FROM import_tasks ORDER BY created_at DESC LIMIT $1", [limit]);
+        return result.rows.map(toTask);
+      }
       markDatabaseUnavailable(error);
-      return Array.from(tasks.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+      return listMemoryTasks(limit);
     }
   },
 
@@ -813,10 +837,12 @@ export const importStore = {
         p99: percentile(logs.map((item) => item.totalDurationMs), 99)
       }
     });
-    if (!pool || databaseUnavailable) {
+    const memorySummary = (includeErrorCounts = true) => {
       const allTasks = Array.from(tasks.values());
       const pendingEvents = Array.from(outbox.values()).filter((event) => event.status === "PENDING").length;
-      const errorCounts = errors.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.errorCode]: (acc[item.errorCode] ?? 0) + 1 }), {});
+      const errorCounts = includeErrorCounts
+        ? errors.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.errorCode]: (acc[item.errorCode] ?? 0) + 1 }), {})
+        : {};
       const errorCountRows = Object.entries(errorCounts).map(([error_code, count]) => ({ error_code, count }));
       const recentPerformance = perfLogs.slice(-20);
       const throughputRowsPerMinute = allTasks
@@ -832,44 +858,59 @@ export const importStore = {
         stageStats: stageStats(recentPerformance),
         recentPerformance
       };
-    }
-    await ensureImportTables();
-    if (databaseUnavailable) {
-      const allTasks = Array.from(tasks.values());
-      const pendingEvents = Array.from(outbox.values()).filter((event) => event.status === "PENDING").length;
-      const recentPerformance = perfLogs.slice(-20);
-      return { database: false, tasks: allTasks, pendingEvents, queueAlert: pendingEvents > 5 ? "WARN" : "OK", throughputRowsPerMinute: 0, errorCounts: [], stageStats: stageStats(recentPerformance), recentPerformance };
-    }
-    const [taskStatus, pending, errorCodes, performance, throughput] = await Promise.all([
-      pool.query("SELECT status, count(*)::int count FROM import_tasks GROUP BY status"),
-      pool.query("SELECT count(*)::int count FROM event_outbox WHERE status = 'PENDING'"),
-      pool.query("SELECT error_code, count(*)::int count FROM import_task_errors GROUP BY error_code ORDER BY count DESC LIMIT 10"),
-      pool.query("SELECT * FROM batch_performance_log ORDER BY created_at DESC LIMIT 50"),
-      pool.query("SELECT COALESCE(SUM(success_rows), 0)::int rows FROM import_tasks WHERE updated_at >= NOW() - INTERVAL '5 minutes'")
-    ]);
-    const recentPerformance = performance.rows.map((row) => ({
-      id: row.id,
-      taskId: row.task_id,
-      traceId: row.trace_id,
-      unitId: row.unit_id,
-      batchIndex: Number(row.batch_index),
-      parseDurationMs: Number(row.parse_duration_ms),
-      ruleDurationMs: Number(row.rule_duration_ms),
-      validateDurationMs: Number(row.validate_duration_ms),
-      insertDurationMs: Number(row.insert_duration_ms),
-      totalDurationMs: Number(row.total_duration_ms),
-      status: row.status,
-      createdAt: new Date(row.created_at).toISOString()
-    } as BatchPerformanceLog));
-    return {
-      database: true,
-      taskStatus: taskStatus.rows,
-      pendingEvents: pending.rows[0]?.count ?? 0,
-      queueAlert: Number(pending.rows[0]?.count ?? 0) > 5 ? "WARN" : "OK",
-      throughputRowsPerMinute: Number(throughput.rows[0]?.rows ?? 0) / 5,
-      errorCounts: errorCodes.rows,
-      stageStats: stageStats(recentPerformance),
-      recentPerformance
     };
+    if (!pool || databaseUnavailable) return memorySummary();
+    const db = pool;
+    const readDatabaseSummary = async () => {
+      const result = await db.query(`
+        SELECT
+          (SELECT COALESCE(jsonb_agg(to_jsonb(task_status_rows)), '[]'::jsonb)
+           FROM (SELECT status, count(*)::int count FROM import_tasks GROUP BY status) task_status_rows) AS task_status,
+          (SELECT count(*)::int FROM event_outbox WHERE status = 'PENDING') AS pending_events,
+          (SELECT COALESCE(jsonb_agg(to_jsonb(error_rows)), '[]'::jsonb)
+           FROM (SELECT error_code, count(*)::int count FROM import_task_errors GROUP BY error_code ORDER BY count DESC LIMIT 10) error_rows) AS error_counts,
+          (SELECT COALESCE(jsonb_agg(to_jsonb(perf_rows)), '[]'::jsonb)
+           FROM (SELECT * FROM batch_performance_log ORDER BY created_at DESC LIMIT 50) perf_rows) AS recent_performance,
+          (SELECT COALESCE(SUM(success_rows), 0)::int FROM import_tasks WHERE updated_at >= NOW() - INTERVAL '5 minutes') AS throughput_rows
+      `);
+      const row = result.rows[0] ?? {};
+      const performanceRows = (row.recent_performance ?? []) as Array<Record<string, unknown>>;
+      const recentPerformance = performanceRows.map((item) => ({
+        id: String(item.id),
+        taskId: String(item.task_id),
+        traceId: String(item.trace_id),
+        unitId: String(item.unit_id),
+        batchIndex: Number(item.batch_index),
+        parseDurationMs: Number(item.parse_duration_ms),
+        ruleDurationMs: Number(item.rule_duration_ms),
+        validateDurationMs: Number(item.validate_duration_ms),
+        insertDurationMs: Number(item.insert_duration_ms),
+        totalDurationMs: Number(item.total_duration_ms),
+        status: String(item.status),
+        createdAt: new Date(String(item.created_at)).toISOString()
+      } as BatchPerformanceLog));
+      const pendingEvents = Number(row.pending_events ?? 0);
+      return {
+        database: true,
+        taskStatus: (row.task_status ?? []) as Array<{ status: string; count: number }>,
+        pendingEvents,
+        queueAlert: pendingEvents > 5 ? "WARN" : "OK",
+        throughputRowsPerMinute: Number(row.throughput_rows ?? 0) / 5,
+        errorCounts: (row.error_counts ?? []) as Array<{ error_code: string; count: number }>,
+        stageStats: stageStats(recentPerformance),
+        recentPerformance
+      };
+    };
+    try {
+      return await readDatabaseSummary();
+    } catch (error) {
+      if (isMissingRelation(error)) {
+        await ensureImportTables();
+        if (databaseUnavailable) return memorySummary(false);
+        return await readDatabaseSummary();
+      }
+      markDatabaseUnavailable(error);
+      return memorySummary();
+    }
   }
 };

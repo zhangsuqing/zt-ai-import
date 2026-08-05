@@ -7,6 +7,12 @@ export const runtime = "nodejs";
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const keyword = searchParams.get("keyword")?.trim() ?? "";
+  if (searchParams.get("mode") === "groups") {
+    const page = Number(searchParams.get("page") ?? 1);
+    const pageSize = Number(searchParams.get("pageSize") ?? 10);
+    const result = await store.listOrderGroups(keyword, page, pageSize);
+    return NextResponse.json({ ...result, database: store.isDatabaseEnabled() });
+  }
   const rows = await store.listOrders(keyword);
 
   return NextResponse.json({ rows, database: store.isDatabaseEnabled() });

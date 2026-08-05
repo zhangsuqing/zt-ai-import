@@ -10,6 +10,7 @@ import {
   Database,
   FileInput,
   FileSpreadsheet,
+  FolderPlus,
   Loader2,
   Plus,
   RefreshCw,
@@ -94,7 +95,9 @@ const makeManualRule = (): ParseRule => ({
   updatedAt: new Date().toISOString()
 });
 
-function groupOrders(rows: OrderRow[]) {
+type HistoryOrder = { externalCode: string; first: OrderRow; items: OrderRow[]; totalQuantity: number };
+
+function groupOrders(rows: OrderRow[]): HistoryOrder[] {
   const groups = new Map<string, OrderRow[]>();
   for (const row of rows) {
     const key = row.externalCode || row.id;
@@ -118,24 +121,56 @@ export default function Page() {
   const [ruleDraft, setRuleDraft] = useState("");
   const [rows, setRows] = useState<OrderRow[]>([]);
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
+  const [previewPage, setPreviewPage] = useState(1);
   const [errors, setErrors] = useState<ValidationError[]>([]);
   const [history, setHistory] = useState<OrderRow[]>([]);
+  const [historyOrders, setHistoryOrders] = useState<HistoryOrder[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
   const [keyword, setKeyword] = useState("");
   const [historyPage, setHistoryPage] = useState(1);
   const [expandedHistoryCodes, setExpandedHistoryCodes] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState("");
+  const [taskAction, setTaskAction] = useState("");
+  const [loadingTasks, setLoadingTasks] = useState(false);
+  const [loadingMonitor, setLoadingMonitor] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTask, setCurrentTask] = useState<ImportTaskView | null>(null);
   const [taskList, setTaskList] = useState<Array<{ id: string; traceId: string; status: string; totalRows: number; processedRows: number; failedRows: number }>>([]);
   const [monitor, setMonitor] = useState<MonitorSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const taskPrefetchedRef = useRef(false);
+  const taskRequestRef = useRef<Promise<number> | null>(null);
+  const monitorPrefetchedRef = useRef(false);
+  const historyPrefetchedRef = useRef(false);
 
   useEffect(() => {
     void refreshRules();
-    void refreshHistory();
-    void refreshImportTasks();
-    void refreshMonitor();
+    const taskTimer = window.setTimeout(() => {
+      void refreshImportTasks(false);
+    }, 800);
+    const monitorTimer = window.setTimeout(() => {
+      void refreshMonitor(false);
+    }, 1400);
+    const historyTimer = window.setTimeout(() => {
+      void refreshHistory("", 1, false);
+    }, 1800);
+    return () => {
+      window.clearTimeout(taskTimer);
+      window.clearTimeout(monitorTimer);
+      window.clearTimeout(historyTimer);
+    };
   }, []);
+  useEffect(() => {
+    if (activeSection === "tasks") {
+      if (!taskPrefetchedRef.current) void refreshImportTasks();
+      return;
+    }
+    if (activeSection === "monitor") {
+      void refreshMonitor();
+      void refreshHistory(keyword, 1);
+    }
+  }, [activeSection]);
 
   useEffect(() => {
     setErrors(validateRows(rows, history.map((row) => row.externalCode)));
@@ -167,31 +202,60 @@ export default function Page() {
     setRules(data.rules ?? []);
   }
 
-  async function refreshHistory(search = "") {
-    const res = await fetch(`/api/orders?keyword=${encodeURIComponent(search)}`);
-    const data = await res.json();
-    setHistory(data.rows ?? []);
-    setHistoryPage(1);
+  async function refreshHistory(search = keyword, page = 1, showLoading = true) {
+    try {
+      if (showLoading) setLoadingHistory(true);
+      const res = await fetch(`/api/orders?mode=groups&keyword=${encodeURIComponent(search)}&page=${page}&pageSize=10`);
+      const data = await res.json();
+      const groups = (data.groups ?? []) as HistoryOrder[];
+      setHistoryOrders(groups);
+      setHistory(groups.flatMap((group) => group.items));
+      setHistoryTotal(Number(data.total ?? groups.length));
+      setHistoryPage(Number(data.page ?? page));
+      if (!search && page === 1) historyPrefetchedRef.current = true;
+    } finally {
+      if (showLoading) setLoadingHistory(false);
+    }
   }
 
-  async function refreshImportTasks() {
-    const res = await fetch("/api/import-tasks");
-    const data = await res.json();
-    const nextTasks = (data.tasks ?? []).map((task: any) => ({
-      id: task.id,
-      traceId: task.traceId,
-      status: task.status,
-      totalRows: task.totalRows,
-      processedRows: task.processedRows,
-      failedRows: task.failedRows
-    }));
-    setTaskList(nextTasks);
-    return nextTasks.length;
+  async function refreshImportTasks(showLoading = true) {
+    if (taskRequestRef.current) return taskRequestRef.current;
+    const request = (async () => {
+      try {
+        if (showLoading) setLoadingTasks(true);
+        const res = await fetch("/api/import-tasks");
+        const data = await res.json();
+        const nextTasks = (data.tasks ?? []).map((task: any) => ({
+          id: task.id,
+          traceId: task.traceId,
+          status: task.status,
+          totalRows: task.totalRows,
+          processedRows: task.processedRows,
+          failedRows: task.failedRows
+        }));
+        setTaskList(nextTasks);
+        taskPrefetchedRef.current = true;
+        return nextTasks.length;
+      } finally {
+        if (showLoading) setLoadingTasks(false);
+        taskRequestRef.current = null;
+      }
+    })();
+    taskRequestRef.current = request;
+    return request;
   }
 
-  async function refreshMonitor() {
-    const res = await fetch("/api/import-monitor/summary");
-    if (res.ok) setMonitor(await res.json());
+  async function refreshMonitor(showLoading = true) {
+    try {
+      if (showLoading) setLoadingMonitor(true);
+      const res = await fetch("/api/import-monitor/summary");
+      if (res.ok) {
+        setMonitor(await res.json());
+        monitorPrefetchedRef.current = true;
+      }
+    } finally {
+      if (showLoading) setLoadingMonitor(false);
+    }
   }
 
   async function pumpImportQueue() {
@@ -206,13 +270,14 @@ export default function Page() {
     const data = await res.json() as ImportTaskView;
     setCurrentTask(data);
     if (["COMPLETED", "PARTIAL_SUCCESS", "FAILED"].includes(data.status)) {
-      await refreshHistory(keyword);
+      if (activeSection === "monitor") await refreshHistory(keyword, historyPage);
       await refreshImportTasks();
     }
   }
 
   async function handlePumpQueue() {
     try {
+      setTaskAction("pump");
       const result = await pumpImportQueue();
       if (currentTask) await refreshTask(currentTask.task_id);
       await refreshImportTasks();
@@ -222,27 +287,35 @@ export default function Page() {
       toast.success(claimed || recovered ? `队列已推进：处理 ${claimed} 个事件，恢复 ${recovered} 个批次` : "队列已检查：暂无待处理事件");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "推进队列失败");
+    } finally {
+      setTaskAction("");
     }
   }
 
   async function handleRefreshTasks() {
     try {
+      setTaskAction("refresh");
       const count = await refreshImportTasks();
       if (currentTask) await refreshTask(currentTask.task_id);
       await refreshMonitor();
       toast.success(`任务已刷新：${count} 条`);
     } catch {
       toast.error("刷新任务失败");
+    } finally {
+      setTaskAction("");
     }
   }
 
   async function handleOpenTask(taskId: string) {
     try {
+      setTaskAction(`open:${taskId}`);
       await refreshTask(taskId);
       await refreshMonitor();
       toast.success(`已打开任务：${taskId}`);
     } catch {
       toast.error("打开任务失败");
+    } finally {
+      setTaskAction("");
     }
   }
 
@@ -255,6 +328,7 @@ export default function Page() {
       const extracted = await extractFile(selected);
       setFile(extracted);
       setRows([]);
+      setPreviewPage(1);
       setSelectedRowIds(new Set());
       setProgress(45);
       if (activeRule) {
@@ -347,6 +421,7 @@ export default function Page() {
       setRuleDraft(JSON.stringify(rule, null, 2));
       const parsed = parseWithRule(file, rule);
       setRows(parsed);
+      setPreviewPage(1);
       setSelectedRowIds(new Set());
       toast.success(`试解析完成 ${parsed.length} 行`);
     } catch (error) {
@@ -381,6 +456,7 @@ export default function Page() {
   function deleteSelectedRows() {
     setRows((current) => current.filter((row) => !selectedRowIds.has(row.id)));
     setSelectedRowIds(new Set());
+    setPreviewPage(1);
   }
 
   function exportExcel() {
@@ -418,6 +494,9 @@ export default function Page() {
         degraded: false,
         progress: 0
       });
+      setRows([]);
+      setSelectedRowIds(new Set());
+      setPreviewPage(1);
       setActiveSection("tasks");
       const res = await fetch("/api/import-tasks", {
         method: "POST",
@@ -444,14 +523,23 @@ export default function Page() {
         degraded: false,
         progress: 0
       });
+      setTaskList((current) => [
+        {
+          id: data.task_id,
+          traceId: data.trace_id,
+          status: data.status,
+          totalRows: data.total_rows,
+          processedRows: 0,
+          failedRows: 0
+        },
+        ...current.filter((task) => task.id !== data.task_id)
+      ]);
+      taskPrefetchedRef.current = true;
       setActiveSection("tasks");
-      void refreshImportTasks();
       void (async () => {
         try {
           await pumpImportQueue();
           await refreshTask(data.task_id);
-          await refreshImportTasks();
-          await refreshMonitor();
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "推进队列失败");
         }
@@ -464,12 +552,15 @@ export default function Page() {
     }
   }
 
-  const historyOrders = useMemo(() => groupOrders(history), [history]);
   const historyPageSize = 10;
-  const totalHistoryPages = Math.max(1, Math.ceil(historyOrders.length / historyPageSize));
+  const totalHistoryPages = Math.max(1, Math.ceil(historyTotal / historyPageSize));
   const currentHistoryPage = Math.min(historyPage, totalHistoryPages);
-  const pagedHistoryOrders = historyOrders.slice((currentHistoryPage - 1) * historyPageSize, currentHistoryPage * historyPageSize);
-  const visibleRows = rows.slice(0, 200);
+  const pagedHistoryOrders = historyOrders;
+  const previewPageSize = 50;
+  const totalPreviewPages = Math.max(1, Math.ceil(rows.length / previewPageSize));
+  const currentPreviewPage = Math.min(previewPage, totalPreviewPages);
+  const visibleRows = rows.slice((currentPreviewPage - 1) * previewPageSize, currentPreviewPage * previewPageSize);
+  const visibleRowStart = (currentPreviewPage - 1) * previewPageSize;
 
   return (
     <div className="app-shell">
@@ -495,16 +586,23 @@ export default function Page() {
         <section className="content">
           {activeSection === "import" && <div className="grid-2">
             <div className="panel rule-editor">
-              <div className="upload-zone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleFiles(event.dataTransfer.files); }}>
-                <div>
-                  <strong>上传任意格式出库单</strong>
-                  <div className="muted">继续复用 V2 文件解析和规则引擎；提交时进入异步任务链路。</div>
-                  {file && <div className="muted">当前文件：{file.fileName}</div>}
-                </div>
-                <input ref={inputRef} hidden type="file" accept=".xlsx,.xls,.csv,.docx,.pdf,.txt" onChange={(event) => void handleFiles(event.target.files)} />
-                <button className="btn primary" onClick={() => inputRef.current?.click()}><UploadCloud size={16} />导入</button>
+              <div className="upload-card">
+                <div className="upload-title">文件上传</div>
+                <button
+                  type="button"
+                  className="upload-zone"
+                  onClick={() => inputRef.current?.click()}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => { event.preventDefault(); void handleFiles(event.dataTransfer.files); }}
+                >
+                  <FolderPlus className="upload-folder" size={92} strokeWidth={1.7} />
+                  <strong>点击或拖拽文件</strong>
+                  <span>支持格式: .xls,.xlsx</span>
+                  {file && <em>当前文件: {file.fileName}</em>}
+                </button>
+                <input ref={inputRef} hidden type="file" accept=".xlsx,.xls" onChange={(event) => void handleFiles(event.target.files)} />
+                {progress > 0 && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
               </div>
-              {progress > 0 && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
               <div className="toolbar rule-actions" style={{ paddingInline: 0 }}>
                 <button className="btn soft" onClick={() => void generateRule()} disabled={!file || Boolean(busy)}>{busy.includes("AI") ? <Loader2 size={15} className="spin" /> : <FileInput size={15} />}AI 生成规则</button>
                 <button className="btn" onClick={() => useRule(makeManualRule())}><Plus size={15} />新建规则</button>
@@ -534,7 +632,7 @@ export default function Page() {
           {activeSection === "import" && <div className="panel">
             <div className="toolbar">
               <div className="toolbar-group">
-                <button className="btn primary" onClick={() => { setRows((current) => [emptyOrderRow(), ...current]); setSelectedRowIds(new Set()); }}><Plus size={15} />新增</button>
+                <button className="btn primary" onClick={() => { setRows((current) => [emptyOrderRow(), ...current]); setSelectedRowIds(new Set()); setPreviewPage(1); }}><Plus size={15} />新增</button>
                 <button className="btn danger" onClick={deleteSelectedRows} disabled={!selectedRowIds.size}><Trash2 size={15} />删除选中</button>
                 <button className="btn soft" onClick={exportExcel} disabled={!rows.length}><ArrowDownToLine size={15} />导出 Excel</button>
                 <button className="btn primary" onClick={submitOrders} disabled={Boolean(busy) || errors.length > 0 || rows.length === 0}>{busy === "创建异步导入任务" ? <Loader2 size={15} className="spin" /> : <Send size={15} />}{busy === "创建异步导入任务" ? "提交中" : "异步提交下单"}</button>
@@ -545,7 +643,8 @@ export default function Page() {
                 <span className="muted">共 {rows.length} 行</span>
               </div>
             </div>
-            <EditableTable rows={visibleRows} selectedRowIds={selectedRowIds} errors={errorMap} onChange={updateCell} onToggleRow={toggleRowSelection} onToggleAll={toggleVisibleRowsSelection} />
+            <EditableTable rows={visibleRows} rowOffset={visibleRowStart} selectedRowIds={selectedRowIds} errors={errorMap} onChange={updateCell} onToggleRow={toggleRowSelection} onToggleAll={toggleVisibleRowsSelection} />
+            {rows.length > 0 && <div className="pagination-bar"><button className="btn" disabled={currentPreviewPage <= 1} onClick={() => setPreviewPage((page) => Math.max(1, page - 1))}>上一页</button><span className="muted">第 {currentPreviewPage} / {totalPreviewPages} 页，共 {rows.length} 行</span><button className="btn" disabled={currentPreviewPage >= totalPreviewPages} onClick={() => setPreviewPage((page) => Math.min(totalPreviewPages, page + 1))}>下一页</button></div>}
             {errors.length > 0 && <div className="error-list">{errors.slice(0, 100).map((error, index) => <div key={`${error.rowId}-${index}`}>第 {error.rowNumber} 行 / {error.field === "row" ? "整行" : fieldLabels[error.field]}：{error.message}</div>)}</div>}
           </div>}
 
@@ -554,15 +653,17 @@ export default function Page() {
               <div className="toolbar">
                 <div className="toolbar-group"><Activity size={16} /><strong>任务进度追踪</strong><span className="muted">轮询状态并推进 outbox 消费。</span></div>
                 <div className="toolbar-group">
-                  <button className="btn" onClick={() => void handlePumpQueue()}><RefreshCw size={15} />推进队列</button>
-                  <button className="btn" onClick={() => void handleRefreshTasks()}>刷新任务</button>
+                  <button className="btn" onClick={() => void handlePumpQueue()} disabled={Boolean(taskAction)}>{taskAction === "pump" ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}推进队列</button>
+                  <button className="btn" onClick={() => void handleRefreshTasks()} disabled={Boolean(taskAction)}>{taskAction === "refresh" ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}刷新任务</button>
                 </div>
               </div>
+              {loadingTasks && <div className="inline-loading"><Loader2 size={15} className="spin" />正在加载任务</div>}
               <TaskProgress task={currentTask} />
             </div>
 
             <div className="panel">
               <div className="toolbar"><Database size={16} /><strong>监控告警</strong><span className="muted">队列积压、错误分布、任务状态。</span></div>
+              {loadingMonitor && <div className="inline-loading"><Loader2 size={15} className="spin" />正在加载监控</div>}
               <MonitorPanel monitor={monitor} />
             </div>
           </div>}
@@ -571,20 +672,22 @@ export default function Page() {
             <div className="toolbar">
               <div className="toolbar-group"><ClipboardList size={16} /><strong>最近任务</strong></div>
             </div>
-            <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} onOpen={(taskId) => void handleOpenTask(taskId)} />
+            {loadingTasks && <div className="inline-loading"><Loader2 size={15} className="spin" />正在加载任务</div>}
+            <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} loadingTaskId={taskAction.startsWith("open:") ? taskAction.slice(5) : undefined} onOpen={(taskId) => void handleOpenTask(taskId)} />
           </div>}
 
           {activeSection === "monitor" && <div className="grid-2">
             <div className="panel">
               <div className="toolbar"><Database size={16} /><strong>监控告警</strong><span className="muted">吞吐、积压、阶段耗时和错误分布。</span></div>
+              {loadingMonitor && <div className="inline-loading"><Loader2 size={15} className="spin" />正在加载监控</div>}
               <MonitorPanel monitor={monitor} />
             </div>
             <div className="panel">
               <div className="toolbar">
                 <div className="toolbar-group"><ClipboardList size={16} /><strong>最近任务</strong></div>
-                <button className="btn" onClick={() => void handleRefreshTasks()}><RefreshCw size={15} />刷新</button>
+                <button className="btn" onClick={() => void handleRefreshTasks()} disabled={Boolean(taskAction)}>{taskAction === "refresh" ? <Loader2 size={15} className="spin" /> : null}<RefreshCw size={15} />刷新</button>
               </div>
-              <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} onOpen={(taskId) => { setActiveSection("tasks"); void handleOpenTask(taskId); }} />
+              <TaskList tasks={taskList} activeTaskId={currentTask?.task_id} loadingTaskId={taskAction.startsWith("open:") ? taskAction.slice(5) : undefined} onOpen={(taskId) => { setActiveSection("tasks"); void handleOpenTask(taskId); }} />
             </div>
           </div>}
 
@@ -593,11 +696,12 @@ export default function Page() {
               <div className="toolbar-group"><FileSpreadsheet size={16} /><strong>已导入运单列表</strong><span className="muted">服务端读取，按外部编码聚合。</span></div>
               <div className="toolbar-group">
                 <input className="input" value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="外部编码/姓名/门店" />
-                <button className="btn primary" onClick={() => void refreshHistory(keyword)}><Search size={15} />查询</button>
+                <button className="btn primary" onClick={() => void refreshHistory(keyword, 1)} disabled={loadingHistory}>{loadingHistory ? <Loader2 size={15} className="spin" /> : <Search size={15} />}查询</button>
               </div>
             </div>
+            {loadingHistory && <div className="inline-loading"><Loader2 size={15} className="spin" />正在加载运单</div>}
             <HistoryTable orders={pagedHistoryOrders} expandedCodes={expandedHistoryCodes} onToggle={(externalCode) => setExpandedHistoryCodes((current) => { const next = new Set(current); if (next.has(externalCode)) next.delete(externalCode); else next.add(externalCode); return next; })} />
-            <div className="pagination-bar"><button className="btn" disabled={currentHistoryPage <= 1} onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}>上一页</button><span className="muted">第 {currentHistoryPage} / {totalHistoryPages} 页，共 {historyOrders.length} 条</span><button className="btn" disabled={currentHistoryPage >= totalHistoryPages} onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}>下一页</button></div>
+            <div className="pagination-bar"><button className="btn" disabled={currentHistoryPage <= 1} onClick={() => void refreshHistory(keyword, Math.max(1, currentHistoryPage - 1))}>上一页</button><span className="muted">第 {currentHistoryPage} / {totalHistoryPages} 页，共 {historyTotal} 条</span><button className="btn" disabled={currentHistoryPage >= totalHistoryPages} onClick={() => void refreshHistory(keyword, Math.min(totalHistoryPages, currentHistoryPage + 1))}>下一页</button></div>
           </div>}
         </section>
       </main>
@@ -607,6 +711,7 @@ export default function Page() {
 
 function EditableTable({
   rows,
+  rowOffset,
   selectedRowIds,
   errors,
   onChange,
@@ -614,6 +719,7 @@ function EditableTable({
   onToggleAll
 }: {
   rows: OrderRow[];
+  rowOffset: number;
   selectedRowIds: Set<string>;
   errors: Map<string, Set<string>>;
   onChange: (rowId: string, field: CanonicalField, value: string) => void;
@@ -656,7 +762,7 @@ function EditableTable({
                     aria-label={`选择第 ${index + 1} 行`}
                   />
                 </td>
-                <td>{index + 1}</td>
+                <td>{rowOffset + index + 1}</td>
                 {editableFields.map((field) => (
                   <td key={field} className={rowErrors?.has(field) || rowErrors?.has("row") ? "error-cell" : ""}>
                     <input value={String(row[field] ?? "")} onChange={(event) => onChange(row.id, field, event.target.value)} />
@@ -704,10 +810,12 @@ function TaskProgress({ task }: { task: ImportTaskView | null }) {
 function TaskList({
   tasks,
   activeTaskId,
+  loadingTaskId,
   onOpen
 }: {
   tasks: Array<{ id: string; traceId: string; status: string; totalRows: number; processedRows: number; failedRows: number }>;
   activeTaskId?: string;
+  loadingTaskId?: string;
   onOpen: (taskId: string) => void;
 }) {
   if (!tasks.length) return <div className="empty">暂无任务记录。</div>;
@@ -715,7 +823,7 @@ function TaskList({
     <div className="table-wrap" style={{ maxHeight: 260 }}>
       <table>
         <thead><tr><th>task_id</th><th>trace_id</th><th>状态</th><th>进度</th><th>失败行</th><th>操作</th></tr></thead>
-        <tbody>{tasks.map((task) => <tr key={task.id} className={activeTaskId === task.id ? "active-row" : ""}><td>{task.id}</td><td>{task.traceId}</td><td>{task.status}</td><td>{task.processedRows}/{task.totalRows}</td><td>{task.failedRows}</td><td><button className="link-btn" onClick={() => onOpen(task.id)}>查看</button></td></tr>)}</tbody>
+        <tbody>{tasks.map((task) => <tr key={task.id} className={activeTaskId === task.id ? "active-row" : ""}><td>{task.id}</td><td>{task.traceId}</td><td>{task.status}</td><td>{task.processedRows}/{task.totalRows}</td><td>{task.failedRows}</td><td><button className="link-btn" onClick={() => onOpen(task.id)} disabled={loadingTaskId === task.id}>{loadingTaskId === task.id ? "加载中" : "查看"}</button></td></tr>)}</tbody>
       </table>
     </div>
   );
