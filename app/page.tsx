@@ -135,10 +135,12 @@ export default function Page() {
   const [loadingMonitor, setLoadingMonitor] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [progressLabel, setProgressLabel] = useState("");
   const [currentTask, setCurrentTask] = useState<ImportTaskView | null>(null);
   const [taskList, setTaskList] = useState<Array<{ id: string; traceId: string; status: string; totalRows: number; processedRows: number; failedRows: number }>>([]);
   const [monitor, setMonitor] = useState<MonitorSummary | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const progressResetTimerRef = useRef<number | null>(null);
   const taskPrefetchedRef = useRef(false);
   const taskRequestRef = useRef<Promise<number> | null>(null);
   const monitorPrefetchedRef = useRef(false);
@@ -159,6 +161,7 @@ export default function Page() {
       window.clearTimeout(taskTimer);
       window.clearTimeout(monitorTimer);
       window.clearTimeout(historyTimer);
+      if (progressResetTimerRef.current) window.clearTimeout(progressResetTimerRef.current);
     };
   }, []);
   useEffect(() => {
@@ -195,6 +198,24 @@ export default function Page() {
     }
     return map;
   }, [errors]);
+
+  function showProgress(value: number, label: string) {
+    if (progressResetTimerRef.current) {
+      window.clearTimeout(progressResetTimerRef.current);
+      progressResetTimerRef.current = null;
+    }
+    setProgress(value);
+    setProgressLabel(label);
+  }
+
+  function hideProgressSoon(delay = 800) {
+    if (progressResetTimerRef.current) window.clearTimeout(progressResetTimerRef.current);
+    progressResetTimerRef.current = window.setTimeout(() => {
+      setProgress(0);
+      setProgressLabel("");
+      progressResetTimerRef.current = null;
+    }, delay);
+  }
 
   async function refreshRules() {
     const res = await fetch("/api/rules");
@@ -324,55 +345,80 @@ export default function Page() {
     if (!selected) return;
     try {
       setBusy("读取文件");
-      setProgress(15);
+      showProgress(15, "读取文件");
       const extracted = await extractFile(selected);
       setFile(extracted);
       setRows([]);
       setPreviewPage(1);
       setSelectedRowIds(new Set());
-      setProgress(45);
+      showProgress(45, "分析文件结构");
       if (activeRule) {
         const normalized = normalizeParseRule(activeRule, extracted);
         setActiveRule(normalized);
         setRuleDraft(JSON.stringify(normalized, null, 2));
+        showProgress(100, "已沿用当前规则");
+        hideProgressSoon();
         toast.success("文件读取完成，已沿用当前规则");
       } else {
         await generateRule(extracted);
         toast.success("文件读取完成");
       }
     } catch (error) {
+      setProgress(0);
+      setProgressLabel("");
       toast.error(error instanceof Error ? error.message : "文件读取失败");
     } finally {
       setBusy("");
-      setProgress(0);
     }
   }
 
 
   async function generateRule(targetFile = file) {
     if (!targetFile) return toast.error("请先上传文件");
+    let aiProgressTimer: number | null = null;
     try {
       setBusy("AI 生成规则");
+      showProgress(55, "AI 分析样例数据");
+      aiProgressTimer = window.setInterval(() => {
+        setProgress((current) => {
+          if (current < 70) {
+            setProgressLabel("AI 识别字段映射");
+            return current + 5;
+          }
+          if (current < 86) {
+            setProgressLabel("AI 生成解析规则");
+            return current + 2;
+          }
+          setProgressLabel("等待 AI 返回结果");
+          return Math.min(current + 1, 92);
+        });
+      }, 500);
       const res = await fetch("/api/ai-rule", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file: targetFile })
       });
+      showProgress(94, "读取 AI 结果");
       const text = await res.text();
       const data = text ? JSON.parse(text) : null;
       if (!res.ok || !data?.rule) {
         throw new Error(data?.error ?? `AI 生成规则失败：HTTP ${res.status}`);
       }
+      showProgress(98, "写入规则草稿");
       setActiveRule(data.rule);
       setRuleDraft(JSON.stringify(data.rule, null, 2));
+      showProgress(100, "规则生成完成");
+      hideProgressSoon();
       toast.success(data.note ?? "规则已生成");
     } catch (error) {
+      setProgress(0);
+      setProgressLabel("");
       toast.error(error instanceof Error ? error.message : "AI 生成规则失败");
     } finally {
+      if (aiProgressTimer) window.clearInterval(aiProgressTimer);
       setBusy("");
     }
   }
-
 
   async function saveRule() {
     try {
@@ -601,7 +647,15 @@ export default function Page() {
                   {file && <em>当前文件: {file.fileName}</em>}
                 </button>
                 <input ref={inputRef} hidden type="file" accept=".xlsx,.xls" onChange={(event) => void handleFiles(event.target.files)} />
-                {progress > 0 && <div className="progress"><span style={{ width: `${progress}%` }} /></div>}
+                {progress > 0 && (
+                  <div className="progress-wrap">
+                    <div className="progress-meta">
+                      <span>{progressLabel || busy}</span>
+                      <strong>{progress}%</strong>
+                    </div>
+                    <div className="progress"><span style={{ width: `${progress}%` }} /></div>
+                  </div>
+                )}
               </div>
               <div className="toolbar rule-actions" style={{ paddingInline: 0 }}>
                 <button className="btn soft" onClick={() => void generateRule()} disabled={!file || Boolean(busy)}>{busy.includes("AI") ? <Loader2 size={15} className="spin" /> : <FileInput size={15} />}AI 生成规则</button>

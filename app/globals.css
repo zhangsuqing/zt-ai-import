@@ -418,6 +418,25 @@ button {
   font-size: 13px;
 }
 
+
+.progress-wrap {
+  display: grid;
+  gap: 6px;
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.progress-meta strong {
+  color: #1f2937;
+}
+
 .progress {
   height: 8px;
   background: #e7eef3;

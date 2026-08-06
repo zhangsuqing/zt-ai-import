@@ -95,3 +95,14 @@ BASE_URL=https://zt-ai-import.vercel.app npm run perf:v4
 GET /api/v1/waybills?waybillNo=LOAD_000001
 GET /api/v1/waybills?keyword=LOAD
 ```
+
+## 提交物与演示访问说明
+
+- 在线地址：https://zt-ai-import.vercel.app
+- 源码仓库：https://github.com/zhangsuqing/zt-ai-import.git
+- 演示方式：当前演示系统无需登录账号，打开首页即可使用。
+- 导入页：点击“万能导入解析”，上传 Excel，选择或 AI 生成规则，点击“试解析”，再点击“异步提交下单”。
+- 任务页：点击“任务追踪”，查看 task_id、trace_id、状态、处理进度、失败行和最近任务。
+- 监控页：点击“监控告警”，查看 Outbox 积压、任务状态、错误分布、吞吐和阶段耗时。
+- 压测数据脚本：`npm run seed:v4` 生成/灌入 20,000 条 SKU 主数据，并生成 `test-data/10000-orders.xlsx`。
+- 压测命令：本地 `npm run perf:v4`；线上 `BASE_URL=https://zt-ai-import.vercel.app npm run perf:v4`。
